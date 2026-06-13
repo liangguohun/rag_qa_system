@@ -4,6 +4,9 @@
 激活环境
 conda activate langchain_env 
 cd F:\aiDemo\rag_qa_system
+
+运行应用
+python ./main.py
 ```
 
 ## 智谱 模型配置
