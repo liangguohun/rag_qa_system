@@ -90,6 +90,9 @@ class SafeZhipuEmbeddings:
             raise
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# ---------------------- 工具封装成 Skill 模块 ----------------------
+# ---------------------------------------------------------------------------
 
 # ---------------------- 新增简单 Tool 用例 ----------------------
 # 新增 tool 相关导入
@@ -191,13 +194,33 @@ def weather_check(city: str = "北京") -> str:
     
     weather_info = weather_data.get(city, f"{city}：晴天，温度 22°C，湿度 50%")
     return f"{city}天气：{weather_info}"
+# 统一 Skill 列表
+ALL_SKILLS = [
+    get_current_time,
+    calculate,
+    get_word_length,
+    weather_check
+]
+
+# ---------------------------------------------------------------------------
+# ---------------------- Agent 封装（稳定调用版） ----------------------
+# ---------------------------------------------------------------------------
+    
 # ---------------------- 创建带工具的 Agent ----------------------
 def create_agent_with_tools(llm):
+
     """创建带有工具的 Agent"""
+    # # 定义工具列表
+    # tools = [get_current_time, calculate, get_word_length, weather_check]
     
-    # 定义工具列表
-    tools = [get_current_time, calculate, get_word_length, weather_check]
-    
+    """
+    封装为 Skill 助手
+    稳定适配 langchain==1.2.15 + 智谱 GLM
+    """
+    tools = ALL_SKILLS
+    # 绑定工具 schema（必须加，否则工具不触发）
+    llm_with_tools = llm.bind_tools(tools)
+
     # 创建 Agent 提示模板
     prompt = ChatPromptTemplate.from_messages([
         ("system", 
@@ -237,15 +260,22 @@ def create_agent_with_tools(llm):
         必须根据问题选择合适的工具，不能编造答案。
         """
 
+    # # 创建 Agent 用这个方式会调用，但不是很准
+    # agent = create_agent(
+    #     model=llm, 
+    #     tools=tools,
+    #     # system_prompt=prompt,
+    #     system_prompt=system_prompt,
+    #     # verbose=True
+    # )
+    
     # 创建 Agent 用这个方式会调用，但不是很准
     agent = create_agent(
-        model=llm, 
+        llm_with_tools,
         tools=tools,
-        # system_prompt=prompt,
-        system_prompt=system_prompt,
-        # verbose=True
+        system_prompt=system_prompt
     )
-    
+
     # agent = create_tool_calling_agent(llm, tools, prompt)
     # # 创建 Agent Executor
     # agent_executor = AgentExecutor(
