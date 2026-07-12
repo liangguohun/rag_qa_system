@@ -5,6 +5,9 @@
 conda activate langchain_env 
 cd F:\aiDemo\rag_qa_system
 
+安装依赖
+pip install -r requirements.txt
+
 运行应用
 python ./main.py
 ```
@@ -123,6 +126,25 @@ else:
         temperature=TEMPERATURE
     )
 
+
+
+```
+
+## MCP 改造整体思路 
+```
+MCP（Model Context Protocol）用来把外部服务能力标准化暴露成可被 LLM 调用的工具，改造分 3 步：
+搭建 MCP 服务端：把现有 4 个本地工具（时间 / 计算 / 文本长度 / 天气）封装为 MCP 服务
+开发 MCP 客户端：在 LangChain Agent 里连接 MCP 服务，自动拉取 MCP 工具 Schema
+改造 Agent 逻辑：移除本地@tool硬编码工具，替换为 MCP 远程工具，原有 RAG、FastAPI 接口完全不用改动
+
+pip install mcp langchain-mcp-adapters python-dotenv
+
+pip install langchain-mcp-adapters==0.2.1 "python-dotenv>=1.0.0"
+```
+
+### 编写 MCP 服务端（mcp_server.py）
+```
+把当前 4 个本地工具封装成 MCP 标准服务，支持 stdio、sse 两种通信方式，这里用最稳定的 stdio 模式
 
 
 ```
