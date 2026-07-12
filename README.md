@@ -8,6 +8,11 @@ cd F:\aiDemo\rag_qa_system
 安装依赖
 pip install -r requirements.txt
 
+查看版本
+pip show 依赖
+升级到最新
+pip install python-dotenv --upgrade
+
 运行应用
 python ./main.py
 ```
@@ -146,5 +151,25 @@ pip install langchain-mcp-adapters==0.2.1 "python-dotenv>=1.0.0"
 ```
 把当前 4 个本地工具封装成 MCP 标准服务，支持 stdio、sse 两种通信方式，这里用最稳定的 stdio 模式
 
+安装依赖
+pip install mcp langchain-mcp-adapters fastmcp
 
+```
+
+### LangChain 调用MCP
+
+```
+from langchain_mcp_adapters.client import MultiServerMCPClient
+
+async def main():
+    client = MultiServerMCPClient({
+        "my-tools": {
+            "command": "python",
+            "args": ["mcp_server.py"],
+            "transport": "stdio"
+        }
+    })
+    
+    tools = await client.get_tools()
+    # 使用 tools 调用 get_current_time, calculate 等
 ```

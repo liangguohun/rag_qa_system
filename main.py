@@ -18,9 +18,15 @@ import asyncio
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global rag_chain, retriever
-    # 这里返回 2 个值！！！
-    rag_chain, retriever = create_rag_chain()
-    print("✅ RAG 链初始化完成")
+    # 尝试初始化 RAG 链；如果失败，只打印错误并继续运行应用
+    try:
+        rag_chain, retriever = create_rag_chain()
+        print("✅ RAG 链初始化完成")
+    except Exception as e:
+        print(f"RAG 链初始化失败（继续运行）：{e}")
+        import traceback
+        traceback.print_exc()
+        rag_chain, retriever = None, None
     yield
     print("🛑 服务关闭")
 
