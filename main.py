@@ -8,7 +8,8 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 from src.rag_chain import create_rag_chain
-from src.rag_chain import test_tools, create_agent_with_tools
+# test_tools, 
+from src.rag_chain import create_agent_with_tools, test_mcp_tools_async
 from typing import Optional
 
 # 🔥 关键：用线程运行，不让 LLM 卡住异步
@@ -17,16 +18,16 @@ import asyncio
 # ===================== 新版 FastAPI 生命周期（无废弃警告）=====================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global rag_chain, retriever
+    global rag_chain, retriever, llm
     # 尝试初始化 RAG 链；如果失败，只打印错误并继续运行应用
     try:
-        rag_chain, retriever = create_rag_chain()
+        rag_chain, retriever, llm = create_rag_chain()
         print("✅ RAG 链初始化完成")
     except Exception as e:
         print(f"RAG 链初始化失败（继续运行）：{e}")
         import traceback
         traceback.print_exc()
-        rag_chain, retriever = None, None
+        rag_chain, retriever, llm = None, None, None
     yield
     print("🛑 服务关闭")
 
@@ -39,11 +40,13 @@ app = FastAPI(
 # 全局变量
 rag_chain = None
 retriever = None
+llm = None
 
 # ===================== 请求模型 =====================
 class QueryRequest(BaseModel):
     question: str
     k: Optional[int] = 3
+    timeout: Optional[float] = 30.0
 
 class QueryResponse(BaseModel):
     answer: str
@@ -57,11 +60,15 @@ async def ask_question(request: QueryRequest):
         # 新版调用：.invoke()
         # answer = rag_chain.invoke(request.question)
 
-        answer = await asyncio.to_thread(
-            rag_chain.invoke,
-            request.question
+        # answer = await asyncio.to_thread(
+        #     rag_chain.invoke,
+        #     request.question
+        # )
+        # 使用 asyncio.wait_for 设置超时
+        answer = await asyncio.wait_for(
+            asyncio.to_thread(rag_chain.invoke, request.question),
+            timeout=request.timeout
         )
-
         print("AI 返回：", answer)
         return {"answer": answer, "sources": []}
     
@@ -73,7 +80,12 @@ async def ask_question(request: QueryRequest):
         #     answer=answer,
         #     sources=sources
         # )
-
+    except asyncio.TimeoutError:
+        print(f"⏰ 问答超时（{request.timeout}秒）")
+        raise HTTPException(
+            status_code=504, 
+            detail=f"问答超时，请稍后重试（超时时间：{request.timeout}秒）"
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"错误：{str(e)}")
 
@@ -82,10 +94,52 @@ async def ask_question(request: QueryRequest):
 async def health_check():
     return {"status": "healthy"}
 
+
+from src.rag_chain import create_agent_with_tools, load_mcp_tools
+from config.mcp_config import MCP_SERVERS, load_mcp_config
+
+# 添加MCP配置端点
+@app.get("/mcp/tools")
+async def get_mcp_tools():
+    """获取当前MCP工具列表"""
+    try:
+        tools = await load_mcp_tools()
+        return {
+            "status": "success",
+            "tools": [
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "args": tool.args_schema.schema() if tool.args_schema else {}
+                }
+                for tool in tools
+            ]
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.post("/mcp/reload")
+async def reload_mcp_config(config_file: str = None):
+    """重新加载MCP配置"""
+    try:
+        if config_file:
+            load_mcp_config(config_file)
+        else:
+            # 重新加载默认配置
+            from config.mcp_config import MCP_SERVERS
+            # 这里重新初始化MCP客户端
+            pass
+        return {"status": "success", "message": "MCP配置已重新加载"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 # ---------------------- 主函数 ----------------------
 from langchain_ollama import OllamaEmbeddings, OllamaLLM
 from langchain_community.chat_models import ChatZhipuAI
 from config.settings import *
+
+# 硬编码的工具测试
+''' 
 def main():
     """主函数：演示如何使用工具和 RAG"""
     
@@ -161,12 +215,86 @@ def main():
         ans = response["messages"][-1].content
         print(ans)
         
+'''
 
+#  mcp 模式的工具测试
+def test_mcp():
+    """主函数：演示如何使用工具和RAG"""
+    import asyncio
+    
+    # 1. 测试MCP工具（使用配置）
+    print("\n🔧 测试MCP工具...")
+    try:
+        # 可以指定配置文件路径
+        config_file = ROOT / "config" / "mcp_servers.json"
+        if config_file.exists():
+            asyncio.run(test_mcp_tools_async(str(config_file)))
+        else:
+            asyncio.run(test_mcp_tools_async())
+    except Exception as e:
+        print(f"MCP测试失败: {e}")
+
+    # 2. 创建RAG链和Agent
+    try:
+        print("\n" + "="*50)
+        print("创建 RAG 链")
+        print("="*50)
+        rag_chain, retriever, llm = create_rag_chain()
+        
+        # 创建带工具的Agent（支持MCP配置）
+        print("\n" + "="*50)
+        print("创建 Agent（支持MCP）")
+        print("="*50)
+        
+        # 可以选择是否使用MCP
+        use_mcp = True  # 可以改为False禁用MCP
+        config_file = ROOT / "config" / "mcp_servers.json"
+        
+        agent = create_agent_with_tools(
+            llm, 
+            use_mcp=use_mcp,
+            mcp_config_file=str(config_file) if config_file.exists() else None
+        )
+
+        if agent is None:
+            print("Agent创建失败")
+            return
+        
+        # 测试Agent
+        print("\n" + "="*50)
+        print("测试 Agent 交互")
+        print("="*50)
+        
+        test_questions = [
+            "vue3 reactor 使用细节及详解",
+            "帮我计算 25 * 4 + 10",
+            "LangChain 这个单词文本长度？",
+            "北京今天天气怎么样？",
+        ]
+        
+        for question in test_questions:
+            print(f"\n用户问题: {question}")
+            try:
+                response = agent.invoke({
+                    "messages": [
+                        {"role": "user", "content": question}
+                    ]
+                })
+                ans = response["messages"][-1].content
+                print(f"助手回答: {ans}")
+                print("-" * 40)
+            except Exception as e:
+                print(f"Agent调用失败: {e}")
+                
+    except Exception as e:
+        print(f"初始化失败: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     # 调用工具用例
-    main()
+    test_mcp()
 
     # 问答用例
-    # import uvicorn
-    # uvicorn.run(app, host="0.0.0.0", port=8000)
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

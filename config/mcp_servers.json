@@ -1,0 +1,14 @@
+{
+    "local-tools": {
+        "command": "python",
+        "args": ["mcp_server.py"],
+        "transport": "stdio",
+        "enabled": true
+    },
+    "custom-tools": {
+        "command": "python",
+        "args": ["custom_mcp_server.py"],
+        "transport": "stdio",
+        "enabled": false
+    }
+}

@@ -12,16 +12,28 @@ from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
 
-from langchain_community.chat_models import ChatZhipuAI
+# from langchain_community.chat_models import ChatZhipuAI
+from langchain_openai import ChatOpenAI
+
 from zhipuai import ZhipuAI  # 官方SDK
 
+
+# mcp 接入修改
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from config.mcp_config import MCP_SERVERS, ENABLED_SERVERS, load_mcp_config, get_enabled_servers, ENABLED_TOOLS
+from pathlib import Path
+import sys
+ROOT = Path(__file__).parent.parent
+# from langchain.agents import create_agent
+
 from config.settings import *
+import requests
 import os
 
 # ---------------------- 修复版的智谱 Embedding ----------------------
 class SafeZhipuEmbeddings:
     def __init__(self, api_key: str, model: str = "embedding-2"):
-        self.client = ZhipuAI(api_key=api_key)
+        self.client = ZhipuAI(api_key=api_key, base_url = "https://open.bigmodel.cn/api/paas/v4/")
         self.model = model
     
     def _clean_text(self, text: str) -> str:
@@ -88,6 +100,11 @@ class SafeZhipuEmbeddings:
         except Exception as e:
             print(f"查询向量化失败：{e}")
             raise
+
+
+# 写死tools 的写法用例
+'''
+
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -317,6 +334,179 @@ def test_tools():
     print(f"   {weather_check.invoke({'city': '北京'})}")
     print(f"   {weather_check.invoke({'city': '上海'})}")
     print(f"   {weather_check.invoke({'city': '未知城市'})}")
+'''
+
+
+# ---------------------- MCP工具加载（可配置版）-----------------------
+async def load_mcp_tools(config_file: str = None):
+    """
+    从配置加载MCP工具
+    
+    Args:
+        config_file: 可选的配置文件路径
+    
+    Returns:
+        MCP工具列表
+    """
+    # 加载配置
+    servers_config, enabled_servers = load_mcp_config(config_file) if config_file else (MCP_SERVERS, ENABLED_SERVERS)
+    
+    # 获取启用的服务器配置（过滤掉enabled字段）
+    enabled_servers_config = get_enabled_servers(servers_config, enabled_servers)
+    
+    if not enabled_servers_config:
+        print("⚠️ 没有启用的MCP服务器")
+        return []
+    
+    try:
+        print(f"📡 连接到MCP服务器: {list(enabled_servers_config.keys())}")
+        
+        # 创建MCP客户端（只传入支持的配置）
+        client = MultiServerMCPClient(enabled_servers_config)
+        tools = await client.get_tools()
+        
+        # 根据配置过滤工具
+        filtered_tools = []
+        for tool in tools:
+            if ENABLED_TOOLS.get(tool.name, True):
+                filtered_tools.append(tool)
+            else:
+                print(f"⏭️ 跳过禁用的工具: {tool.name}")
+        
+        print(f"✅ MCP加载了 {len(filtered_tools)} 个工具")
+        for tool in filtered_tools:
+            print(f"   - {tool.name}: {tool.description}")
+        
+        return filtered_tools
+    except Exception as e:
+        print(f"❌ MCP工具加载失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+from langchain.agents import create_agent 
+
+# ---------------------- 创建带工具的Agent（支持MCP）-----------------------
+def create_agent_with_tools(llm, use_mcp: bool = True, mcp_config_file: str = None ):
+    """
+    创建带有工具的Agent
+    
+    Args:
+        llm: 语言模型
+        use_mcp: 是否使用MCP工具
+        mcp_config_file: MCP配置文件路径
+        verbose: 是否打印详细执行过程
+    """
+    all_tools = []
+    
+    # # 1. 加载本地工具（始终加载）
+    # local_tools = ALL_SKILLS
+    
+    # 根据配置过滤本地工具
+    filtered_local_tools = [
+        # tool for tool in local_tools 
+        # if ENABLED_TOOLS.get(tool.name, True)
+    ]
+    all_tools.extend(filtered_local_tools)
+    
+    # 2. 加载MCP工具（可选）
+    if use_mcp:
+        try:
+            # 同步方式加载MCP工具
+            import asyncio
+            mcp_tools = asyncio.run(load_mcp_tools(mcp_config_file))
+            all_tools.extend(mcp_tools)
+            print(f"✅ 共加载 {len(all_tools)} 个工具 (本地: {len(filtered_local_tools)}, MCP: {len(mcp_tools)})")
+        except Exception as e:
+            print(f"⚠️ MCP工具加载失败: {e}，仅使用本地工具")
+    
+    # 如果没有工具，返回提示
+    if not all_tools:
+        print("⚠️ 没有可用的工具，Agent将无法调用工具")
+        return None, []
+    
+    ''' 
+        # 创建Agent
+        # 'OllamaLLM' object has no attribute 'bind_tools' 
+        llm_with_tools = llm.bind_tools(all_tools)
+        
+        system_prompt = """
+            你是一个有帮助的助手，可以使用以下工具来回答用户问题：
+            {tools}
+
+            工具名称: {tool_names}
+
+            使用说明：
+            1. 需要当前时间 → get_current_time
+            2. 需要数学计算 → calculate
+            3. 需要文本长度 → get_word_length
+            4. 需要查询天气 → weather_check
+            5. 其他工具请根据名称和描述选择合适的工具
+
+            必须根据问题选择合适的工具，不能编造答案。
+        """
+        
+        agent = create_agent(
+            llm_with_tools,
+            tools=all_tools,
+            system_prompt=system_prompt
+        )
+        
+        return agent, all_tools
+    '''
+   
+    if not all_tools:
+        print("⚠️ 没有可用的工具")
+        return None
+
+    system_prompt = """
+                你是一个有帮助的助手，可以使用以下工具来回答用户问题：
+                {all_tools}
+
+                工具名称: {tool_names}
+
+                使用说明：
+                1. 需要当前时间 → get_current_time
+                2. 需要数学计算 → calculate
+                3. 需要文本长度 → get_word_length
+                4. 需要查询天气 → weather_check
+                5. 其他工具请根据名称和描述选择合适的工具
+
+                必须根据问题选择合适的工具，不能编造答案。
+            """
+            
+    agent = create_agent(
+        model=llm,
+        tools=all_tools,
+        system_prompt=system_prompt
+    )
+    return agent
+
+# ---------------------- 异步MCP工具测试 ----------------------
+async def test_mcp_tools_async(config_file: str = None):
+    """异步测试MCP工具"""
+    print("\n" + "="*50)
+    print("测试MCP工具（异步）")
+    print("="*50)
+    
+    tools = await load_mcp_tools(config_file)
+    
+    if not tools:
+        print("没有加载到MCP工具")
+        return
+    
+    # 测试第一个工具
+    if tools:
+        print(f"\n测试工具: {tools[0].name}")
+        try:
+            # 根据工具名称调用不同的参数
+            if tools[0].name == "get_current_time":
+                result = await tools[0].ainvoke({"format_type": "full"})
+            else:
+                result = await tools[0].ainvoke({})
+            print(f"结果: {result}")
+        except Exception as e:
+            print(f"调用失败: {e}")
 
 def create_rag_chain():
     """创建 RAG 链（LangChain v1.0+ 无警告版）"""
@@ -349,20 +539,58 @@ def create_rag_chain():
         # ✅ 新版 Ollama 嵌入模型（无废弃警告）
         embeddings = OllamaEmbeddings(model=LOCAL_EMBEDDING_MODEL)
         # ✅ 新版 Ollama LLM（无废弃警告）
-        llm = OllamaLLM(model=LOCAL_LLM_MODEL, temperature=TEMPERATURE)
+        # llm = OllamaLLM(model=LOCAL_LLM_MODEL, temperature=TEMPERATURE)
+
+        # 本地模型 - 使用Ollama但不支持bind_tools
+        # 对于Ollama，使用ChatOllama而不是OllamaLLM
+        from langchain_ollama import ChatOllama
+        llm = ChatOllama(
+            model=LOCAL_LLM_MODEL,
+            temperature=TEMPERATURE,
+            # 有些Ollama模型支持工具调用
+            # format="json"  # 如果需要JSON输出
+        )
     else:
-        # ✅ 用修复后的智谱 Embedding
+
+
+        # ✅ 用修复后的智谱 Embedding 收费的，他妈的，说免费, 
         embeddings = SafeZhipuEmbeddings(
             api_key=ZHIPU_API_KEY, 
             model=ZHIPU_EMBEDDING_MODEL
         )
         # ✅ LLM用官方ChatZhipuAI
-        llm = ChatZhipuAI(
+        # llm = ChatZhipuAI(
+        #     api_key=ZHIPU_API_KEY,
+        #     model=ZHIPU_MODEL_NAME,
+        #     temperature=TEMPERATURE,
+        #     base_url="https://open.bigmodel.cn/api/paas/v4/",
+        #     verify_ssl=False  # 临时禁用SSL验证
+        # )
+
+        llm = ChatOpenAI(
             api_key=ZHIPU_API_KEY,
             model=ZHIPU_MODEL_NAME,
-            temperature=TEMPERATURE
+            temperature=TEMPERATURE,
+            base_url="https://open.bigmodel.cn/api/paas/v4/",
+            # verify_ssl=False  # 临时禁用SSL验证
         )
-    
+
+        # # 1. 测试网络连通性
+        # try:
+        #     response = requests.get("https://open.bigmodel.cn/api/paas/v4/", timeout=5)
+        #     print(f"网络连通性: {response.status_code}")
+        # except Exception as e:
+        #     print(f"网络错误: {e}")
+
+        # # 2. 测试SSL证书
+        # try:
+        #     response = requests.get("https://open.bigmodel.cn", verify=True)
+        #     print("SSL证书验证通过")
+        # except Exception as e:
+        #     print(f"SSL错误: {e}")
+        #     print("尝试跳过SSL验证...")
+        #     response = requests.get("https://open.bigmodel.cn", verify=False)
+        #     print("跳过SSL验证后连接成功")
     # 4. 创建向量库
     print("正在创建向量数据库...")
     vectorstore = Chroma.from_documents(
@@ -376,16 +604,17 @@ def create_rag_chain():
 
     # ===================== 新版 RAG 链 =====================
     prompt = PromptTemplate.from_template("""
-使用以下上下文来回答最后的问题。
-如果你不知道答案，就直接说不知道，不要编造答案。
+                使用以下上下文来回答最后的问题。
+                如果你不知道答案，就直接说不知道，不要编造答案。
 
-上下文：
-{context}
+                上下文：
+                {context}
 
-问题：{question}
+                问题：{question}
 
-回答：
-""")
+                回答：
+                """
+            )
 
     def format_docs(docs):
         if not docs:

@@ -19,16 +19,19 @@ VECTOR_STORE_DIR = BASE_DIR / "vector_stores" / "chroma_db"
 # # 嵌入模型（向量化用 → 必须是 Ollama 支持的模型） 或则 nomic-embed-text 中文友好
 # LOCAL_EMBEDDING_MODEL = os.getenv("LOCAL_EMBEDDING_MODEL", "bge-m3")
 
-
+LOCAL_LLM_MODEL = os.getenv("LOCAL_LLM_MODEL", "qwen2.5-0.5b-instruct:latest")
+LOCAL_EMBEDDING_MODEL = os.getenv("LOCAL_EMBEDDING_MODEL", "BAAI/bge-small-zh")
+# Ollama 的 embedding 模型 nomic-embed-text英文效果好
+# LOCAL_EMBEDDING_MODEL = os.getenv("LOCAL_EMBEDDING_MODEL", "nomic-embed-text")
 
 # ========== 智谱 AI 免费模型配置 ==========
 USE_LOCAL_LLM = False  # 关闭本地模型
-USE_ZHIPU = True       # 开启智谱免费模型
+USE_ZHIPU = True      # 开启智谱免费模型
 # 智谱 AI 密钥（去官网免费拿）
-ZHIPU_API_KEY = "67ce1ade355b49f7953e2afe8e9a2c6e.P140eSYxFulPYeX5"
+ZHIPU_API_KEY = "dacc77c57e2e4e5ab307dd010c52d3c9.SgfGeAcMRfBAG1dT"
 # 免费模型名称（固定不要改）
 ZHIPU_MODEL_NAME = "glm-4-flash"
-# 嵌入模型（免费、轻量、中文强）
+# 嵌入模型（免费、轻量、中文强） "embedding-2" 不免费，他们的
 ZHIPU_EMBEDDING_MODEL = "embedding-2"
 
 
