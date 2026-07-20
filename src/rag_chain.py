@@ -388,7 +388,7 @@ async def load_mcp_tools(config_file: str = None):
 from langchain.agents import create_agent 
 
 # ---------------------- 创建带工具的Agent（支持MCP）-----------------------
-def create_agent_with_tools(llm, use_mcp: bool = True, mcp_config_file: str = None ):
+async def create_agent_with_tools(llm, use_mcp: bool = True, mcp_config_file: str = None ):
     """
     创建带有工具的Agent
     
@@ -399,89 +399,64 @@ def create_agent_with_tools(llm, use_mcp: bool = True, mcp_config_file: str = No
         verbose: 是否打印详细执行过程
     """
     all_tools = []
-    
-    # # 1. 加载本地工具（始终加载）
-    # local_tools = ALL_SKILLS
-    
-    # 根据配置过滤本地工具
-    filtered_local_tools = [
-        # tool for tool in local_tools 
-        # if ENABLED_TOOLS.get(tool.name, True)
-    ]
-    all_tools.extend(filtered_local_tools)
-    
-    # 2. 加载MCP工具（可选）
+    filtered_local_tools = []
+    mcp_tools = []
+
+    # 1. 如果启用 MCP，则优先加载 MCP 工具
     if use_mcp:
         try:
-            # 同步方式加载MCP工具
-            import asyncio
-            mcp_tools = asyncio.run(load_mcp_tools(mcp_config_file))
-            all_tools.extend(mcp_tools)
-            print(f"✅ 共加载 {len(all_tools)} 个工具 (本地: {len(filtered_local_tools)}, MCP: {len(mcp_tools)})")
+            mcp_tools = await load_mcp_tools(mcp_config_file)
+            if mcp_tools:
+                all_tools.extend(mcp_tools)
+            print(f"✅ MCP工具已加载: {len(mcp_tools)} 个工具")
         except Exception as e:
-            print(f"⚠️ MCP工具加载失败: {e}，仅使用本地工具")
-    
-    # 如果没有工具，返回提示
+            print(f"⚠️ MCP工具加载失败: {e}，将尝试加载本地工具")
+
+    # 2. 如果没有加载到 MCP 工具，则回退到本地工具
+    if not all_tools:
+        print("⚠️ 未加载到 MCP 工具，使用本地工具作为后备")
+        local_tools = ALL_SKILLS
+        filtered_local_tools = [
+            tool for tool in local_tools
+            if ENABLED_TOOLS.get(tool.name, True)
+        ]
+        all_tools.extend(filtered_local_tools)
+        print(f"✅ 本地工具已加载: {len(filtered_local_tools)} 个工具")
+
+    # 3. 如果仍然没有工具，则返回失败
     if not all_tools:
         print("⚠️ 没有可用的工具，Agent将无法调用工具")
         return None, []
-    
-    ''' 
-        # 创建Agent
-        # 'OllamaLLM' object has no attribute 'bind_tools' 
-        llm_with_tools = llm.bind_tools(all_tools)
-        
-        system_prompt = """
-            你是一个有帮助的助手，可以使用以下工具来回答用户问题：
-            {tools}
-
-            工具名称: {tool_names}
-
-            使用说明：
-            1. 需要当前时间 → get_current_time
-            2. 需要数学计算 → calculate
-            3. 需要文本长度 → get_word_length
-            4. 需要查询天气 → weather_check
-            5. 其他工具请根据名称和描述选择合适的工具
-
-            必须根据问题选择合适的工具，不能编造答案。
-        """
-        
-        agent = create_agent(
-            llm_with_tools,
-            tools=all_tools,
-            system_prompt=system_prompt
-        )
-        
-        return agent, all_tools
-    '''
-   
-    if not all_tools:
-        print("⚠️ 没有可用的工具")
-        return None
 
     system_prompt = """
-                你是一个有帮助的助手，可以使用以下工具来回答用户问题：
-                {all_tools}
+                你是一个有帮助的助手。
+                优先使用 MCP 工具来回答用户问题，只有当 MCP 工具不适用时，才考虑其他本地工具。
 
-                工具名称: {tool_names}
+                工具名称：{tool_names}
 
                 使用说明：
-                1. 需要当前时间 → get_current_time
-                2. 需要数学计算 → calculate
-                3. 需要文本长度 → get_word_length
-                4. 需要查询天气 → weather_check
-                5. 其他工具请根据名称和描述选择合适的工具
-
-                必须根据问题选择合适的工具，不能编造答案。
+                1. 首先检查问题是否可以由 MCP 工具回答。
+                2. 如果可以，优先调用 MCP 工具。
+                3. 如果无法调用 MCP 工具，则使用本地工具。
+                4. 不要随意编造答案，必须基于工具返回结果回答。
             """
-            
+
+    # 尝试用 bind_tools 绑定工具，尤其是 MCP StructuredTool 需要 async 支持
+    llm_with_tools = None
+    if hasattr(llm, "bind_tools"):
+        try:
+            llm_with_tools = llm.bind_tools(all_tools)
+            print("✅ LLM bind_tools 成功，可支持 StructuredTool 异步调用")
+        except Exception as e:
+            print(f"⚠️ LLM bind_tools 失败：{e}")
+
+    agent_model = llm_with_tools if llm_with_tools is not None else llm
     agent = create_agent(
-        model=llm,
+        model=agent_model,
         tools=all_tools,
         system_prompt=system_prompt
     )
-    return agent
+    return agent, all_tools
 
 # ---------------------- 异步MCP工具测试 ----------------------
 async def test_mcp_tools_async(config_file: str = None):

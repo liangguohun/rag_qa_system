@@ -15,19 +15,45 @@ from typing import Optional
 # 🔥 关键：用线程运行，不让 LLM 卡住异步
 import asyncio
 
+
+def invoke_agent(agent, payload):
+    """Invoke an agent with async support for StructuredTool-based agents."""
+    if hasattr(agent, "ainvoke"):
+        return asyncio.run(agent.ainvoke(payload))
+    if hasattr(agent, "invoke"):
+        return agent.invoke(payload)
+    raise RuntimeError("当前 Agent 不支持 invoke 或 ainvoke")
+
 # ===================== 新版 FastAPI 生命周期（无废弃警告）=====================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global rag_chain, retriever, llm
+    global rag_chain, retriever, llm, agent, agent_tools
     # 尝试初始化 RAG 链；如果失败，只打印错误并继续运行应用
     try:
         rag_chain, retriever, llm = create_rag_chain()
         print("✅ RAG 链初始化完成")
+
+        # 同时创建 MCP Agent，优先使用 MCP 工具
+        try:
+            config_file = ROOT / "config" / "mcp_servers.json"
+            agent, agent_tools = await create_agent_with_tools(
+                llm,
+                use_mcp=True,
+                mcp_config_file=str(config_file) if config_file.exists() else None
+            )
+            if agent is not None:
+                print(f"✅ Agent 初始化完成，工具数量：{len(agent_tools)}")
+            else:
+                print("⚠️ Agent 初始化失败：未创建 Agent")
+        except Exception as e:
+            print(f"⚠️ Agent 初始化失败：{e}")
+            agent, agent_tools = None, []
     except Exception as e:
         print(f"RAG 链初始化失败（继续运行）：{e}")
         import traceback
         traceback.print_exc()
         rag_chain, retriever, llm = None, None, None
+        agent, agent_tools = None, []
     yield
     print("🛑 服务关闭")
 
@@ -41,6 +67,8 @@ app = FastAPI(
 rag_chain = None
 retriever = None
 llm = None
+agent = None
+agent_tools = []
 
 # ===================== 请求模型 =====================
 class QueryRequest(BaseModel):
@@ -57,29 +85,27 @@ class QueryResponse(BaseModel):
 async def ask_question(request: QueryRequest):
     try:
         print("收到问题：", request.question)
-        # 新版调用：.invoke()
-        # answer = rag_chain.invoke(request.question)
+        payload = {
+            "messages": [
+                {"role": "user", "content": request.question}
+            ]
+        }
 
-        # answer = await asyncio.to_thread(
-        #     rag_chain.invoke,
-        #     request.question
-        # )
-        # 使用 asyncio.wait_for 设置超时
-        answer = await asyncio.wait_for(
-            asyncio.to_thread(rag_chain.invoke, request.question),
-            timeout=request.timeout
-        )
+        if agent is not None:
+            answer = await asyncio.wait_for(
+                asyncio.to_thread(invoke_agent, agent, payload),
+                timeout=request.timeout
+            )
+        elif rag_chain is not None:
+            answer = await asyncio.wait_for(
+                asyncio.to_thread(rag_chain.invoke, request.question),
+                timeout=request.timeout
+            )
+        else:
+            raise RuntimeError("当前没有可用的 Agent 或 RAG 链")
+
         print("AI 返回：", answer)
         return {"answer": answer, "sources": []}
-    
-        # # 获取来源文档
-        # source_docs = retriever.invoke(request.question)
-        # sources = [doc.metadata.get("source", "unknown") for doc in source_docs]
-
-        # return QueryResponse(
-        #     answer=answer,
-        #     sources=sources
-        # )
     except asyncio.TimeoutError:
         print(f"⏰ 问答超时（{request.timeout}秒）")
         raise HTTPException(
@@ -250,11 +276,11 @@ def test_mcp():
         use_mcp = True  # 可以改为False禁用MCP
         config_file = ROOT / "config" / "mcp_servers.json"
         
-        agent = create_agent_with_tools(
+        agent, tools = asyncio.run(create_agent_with_tools(
             llm, 
             use_mcp=use_mcp,
             mcp_config_file=str(config_file) if config_file.exists() else None
-        )
+        ))
 
         if agent is None:
             print("Agent创建失败")
@@ -275,7 +301,7 @@ def test_mcp():
         for question in test_questions:
             print(f"\n用户问题: {question}")
             try:
-                response = agent.invoke({
+                response = invoke_agent(agent, {
                     "messages": [
                         {"role": "user", "content": question}
                     ]
