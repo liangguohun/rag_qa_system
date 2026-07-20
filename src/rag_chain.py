@@ -29,6 +29,7 @@ ROOT = Path(__file__).parent.parent
 from config.settings import *
 import requests
 import os
+import shutil
 
 # ---------------------- 修复版的智谱 Embedding ----------------------
 class SafeZhipuEmbeddings:
@@ -508,6 +509,70 @@ async def test_mcp_tools_async(config_file: str = None):
         except Exception as e:
             print(f"调用失败: {e}")
 
+
+def build_vectorstore(chunks, embeddings=None, persist_dir=None, enable_vectorize=True, force_rebuild=False):
+    """
+    根据配置创建或加载向量数据库。
+
+    Args:
+        chunks: 要索引的文档块列表
+        embeddings: embedding 对象（需兼容 Chroma API）
+        persist_dir: 向量库持久化目录（Path 或 str）
+        enable_vectorize: 是否允许在没有持久化库时进行向量化并创建库
+        force_rebuild: 如果为 True，则删除已有库并重新构建
+
+    Returns:
+        vectorstore 实例（Chroma）
+    """
+    from pathlib import Path
+
+    if persist_dir is None:
+        raise ValueError("persist_dir 不能为空")
+    persist_path = Path(persist_dir)
+
+    # 如果不允许向量化，只能尝试加载已有持久化库
+    if not enable_vectorize:
+        if persist_path.exists() and any(persist_path.iterdir()):
+            print("向量化被禁用；加载已有向量数据库")
+            # 尝试不传 embedding（仅加载已持久化的数据库）
+            try:
+                return Chroma(persist_directory=str(persist_path))
+            except TypeError:
+                # 兼容旧版 API
+                return Chroma(persist_directory=str(persist_path), embedding=embeddings)
+        else:
+            raise RuntimeError(
+                "向量化已被禁用，且未找到持久化向量数据库。请启用向量化或先构建向量库。"
+            )
+
+    # enable_vectorize == True: 根据是否存在库和是否强制重建决定行为
+    if persist_path.exists() and any(persist_path.iterdir()):
+        if force_rebuild:
+            print("检测到已有向量数据库，已设置强制重建，正在删除旧库...")
+            try:
+                shutil.rmtree(persist_path)
+            except Exception as e:
+                print(f"删除旧向量库失败：{e}")
+        else:
+            print("检测到已有向量数据库，直接加载（未强制重建）")
+            try:
+                return Chroma(persist_directory=str(persist_path))
+            except TypeError:
+                return Chroma(persist_directory=str(persist_path), embedding=embeddings)
+
+    # 创建新的向量库
+    print("正在创建向量数据库...")
+    if embeddings is None:
+        raise RuntimeError("要创建新的向量库，必须提供 embeddings 实例")
+
+    vectorstore = Chroma.from_documents(
+        documents=chunks,
+        embedding=embeddings,
+        persist_directory=str(persist_path)
+    )
+    print("向量数据库创建完成")
+    return vectorstore
+
 def create_rag_chain():
     """创建 RAG 链（LangChain v1.0+ 无警告版）"""
     
@@ -534,46 +599,45 @@ def create_rag_chain():
     
     print(f"文档分块为 {len(chunks)} 个块")
     
-    # 3. 向量化（✅ 新版 Ollama 无警告）
-    if USE_LOCAL_LLM:
-        # ✅ 新版 Ollama 嵌入模型（无废弃警告）
-        embeddings = OllamaEmbeddings(model=LOCAL_EMBEDDING_MODEL)
-        # ✅ 新版 Ollama LLM（无废弃警告）
-        # llm = OllamaLLM(model=LOCAL_LLM_MODEL, temperature=TEMPERATURE)
-
-        # 本地模型 - 使用Ollama但不支持bind_tools
-        # 对于Ollama，使用ChatOllama而不是OllamaLLM
-        from langchain_ollama import ChatOllama
-        llm = ChatOllama(
-            model=LOCAL_LLM_MODEL,
-            temperature=TEMPERATURE,
-            # 有些Ollama模型支持工具调用
-            # format="json"  # 如果需要JSON输出
-        )
+    # 3. 向量化（在 ENABLE_VECTORIZE 控制下创建 embeddings，避免不必要的 token 消耗）
+    embeddings = None
+    if ENABLE_VECTORIZE:
+        if USE_LOCAL_LLM:
+            # ✅ 新版 Ollama 嵌入模型（无废弃警告）
+            embeddings = OllamaEmbeddings(model=LOCAL_EMBEDDING_MODEL)
+            # 本地模型 - 使用Ollama但不支持bind_tools
+            from langchain_ollama import ChatOllama
+            llm = ChatOllama(
+                model=LOCAL_LLM_MODEL,
+                temperature=TEMPERATURE,
+            )
+        else:
+            # 使用修复后的智谱 Embedding（实际向量化在 Chroma.from_documents 时触发）
+            embeddings = SafeZhipuEmbeddings(
+                api_key=ZHIPU_API_KEY,
+                model=ZHIPU_EMBEDDING_MODEL
+            )
+            llm = ChatOpenAI(
+                api_key=ZHIPU_API_KEY,
+                model=ZHIPU_MODEL_NAME,
+                temperature=TEMPERATURE,
+                base_url="https://open.bigmodel.cn/api/paas/v4/",
+            )
     else:
-
-
-        # ✅ 用修复后的智谱 Embedding 收费的，他妈的，说免费, 
-        embeddings = SafeZhipuEmbeddings(
-            api_key=ZHIPU_API_KEY, 
-            model=ZHIPU_EMBEDDING_MODEL
-        )
-        # ✅ LLM用官方ChatZhipuAI
-        # llm = ChatZhipuAI(
-        #     api_key=ZHIPU_API_KEY,
-        #     model=ZHIPU_MODEL_NAME,
-        #     temperature=TEMPERATURE,
-        #     base_url="https://open.bigmodel.cn/api/paas/v4/",
-        #     verify_ssl=False  # 临时禁用SSL验证
-        # )
-
-        llm = ChatOpenAI(
-            api_key=ZHIPU_API_KEY,
-            model=ZHIPU_MODEL_NAME,
-            temperature=TEMPERATURE,
-            base_url="https://open.bigmodel.cn/api/paas/v4/",
-            # verify_ssl=False  # 临时禁用SSL验证
-        )
+        # 不进行向量化时仍需创建 LLM 用于生成（但避免创建 embeddings）
+        if USE_LOCAL_LLM:
+            from langchain_ollama import ChatOllama
+            llm = ChatOllama(
+                model=LOCAL_LLM_MODEL,
+                temperature=TEMPERATURE,
+            )
+        else:
+            llm = ChatOpenAI(
+                api_key=ZHIPU_API_KEY,
+                model=ZHIPU_MODEL_NAME,
+                temperature=TEMPERATURE,
+                base_url="https://open.bigmodel.cn/api/paas/v4/",
+            )
 
         # # 1. 测试网络连通性
         # try:
@@ -591,15 +655,15 @@ def create_rag_chain():
         #     print("尝试跳过SSL验证...")
         #     response = requests.get("https://open.bigmodel.cn", verify=False)
         #     print("跳过SSL验证后连接成功")
-    # 4. 创建向量库
-    print("正在创建向量数据库...")
-    vectorstore = Chroma.from_documents(
-        documents=chunks,
-        embedding=embeddings,
-        persist_directory=str(VECTOR_STORE_DIR)
+    # 4. 创建或加载向量库（使用封装函数，受配置开关控制）
+    vectorstore = build_vectorstore(
+        chunks=chunks,
+        embeddings=embeddings,
+        persist_dir=VECTOR_STORE_DIR,
+        enable_vectorize=ENABLE_VECTORIZE,
+        force_rebuild=FORCE_REBUILD_VECTORSTORE,
     )
-    
-    print("向量数据库创建完成")
+
     retriever = vectorstore.as_retriever(search_kwargs={"k": RETRIEVAL_K})
 
     # ===================== 新版 RAG 链 =====================

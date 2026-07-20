@@ -44,3 +44,8 @@ CHUNK_SIZE = 500
 CHUNK_OVERLAP = 50
 RETRIEVAL_K = 3
 TEMPERATURE = 0.0
+# 向量化开关：是否允许在运行时创建/更新向量数据库
+# 如果设置为 False，则仅在已有持久化向量库时加载，否则会抛错提示启用向量化。
+ENABLE_VECTORIZE = False
+# 是否强制重建向量库（删除已有持久化目录并重新创建）
+FORCE_REBUILD_VECTORSTORE = False
