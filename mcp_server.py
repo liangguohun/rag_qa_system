@@ -3,6 +3,7 @@ import asyncio
 import datetime
 import math
 import json
+import sys
 from mcp.server import Server, NotificationOptions
 from mcp.server.models import InitializationOptions
 from mcp.server.stdio import stdio_server
@@ -11,9 +12,15 @@ from mcp.types import Tool, TextContent, GetPromptResult, Prompt, PromptArgument
 # 创建服务器实例
 server = Server("local-tools-server")
 
+# MCP 使用 stdin/stdout 传输 JSON-RPC，print() 会污染协议，日志必须走 stderr
+def _log(msg: str):
+    sys.stderr.write(f"[MCP_SERVER] {msg}\n")
+    sys.stderr.flush()
+
 @server.list_tools()
 async def handle_list_tools() -> list[Tool]:
     """列出所有可用工具"""
+    _log("list_tools 被调用 -- 有客户端正在请求工具列表")
     return [
         Tool(
             name="get_current_time",
@@ -77,6 +84,7 @@ async def handle_list_tools() -> list[Tool]:
 @server.call_tool()
 async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
     """处理工具调用"""
+    _log(f"call_tool 被调用! 工具名={name}, 参数={arguments}")
     try:
         if name == "get_current_time":
             format_type = arguments.get("format_type", "full")

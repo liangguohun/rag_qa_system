@@ -39,12 +39,10 @@ def build_vectorstore(raw_data_dir=None, persist_dir=None, enable_vectorize=True
     _embeddings_cache = None
 
     def _create_embeddings():
-        """按需创建 embeddings，仅在 enable_vectorize 开启且需要向量化时调用。"""
+        """按需创建 embeddings（缓存），查询和向量化均需要。"""
         nonlocal _embeddings_cache
         if _embeddings_cache is not None:
             return _embeddings_cache
-        if not enable_vectorize:
-            return None
         if USE_LOCAL_LLM:
             from langchain_ollama import OllamaEmbeddings
             _embeddings_cache = OllamaEmbeddings(model=LOCAL_EMBEDDING_MODEL)
@@ -146,13 +144,7 @@ def build_vectorstore(raw_data_dir=None, persist_dir=None, enable_vectorize=True
     if not enable_vectorize:
         if persist_path.exists() and any(persist_path.iterdir()):
             print("向量化被禁用；加载已有向量数据库")
-            try:
-                return Chroma(persist_directory=str(persist_path))
-            except TypeError:
-                emb = _create_embeddings()
-                if emb is None:
-                    raise
-                return Chroma(persist_directory=str(persist_path), embedding=emb)
+            return Chroma(persist_directory=str(persist_path), embedding_function=_create_embeddings())
         raise RuntimeError(
             "向量化已被禁用，且未找到持久化向量数据库。请启用向量化或先构建向量库。"
         )
@@ -163,13 +155,7 @@ def build_vectorstore(raw_data_dir=None, persist_dir=None, enable_vectorize=True
 
         if not added_or_modified and not deleted:
             print("未检测到新的或变更的文档，直接加载现有向量数据库")
-            try:
-                return Chroma(persist_directory=str(persist_path))
-            except TypeError:
-                emb = _create_embeddings()
-                if emb is None:
-                    raise
-                return Chroma(persist_directory=str(persist_path), embedding=emb)
+            return Chroma(persist_directory=str(persist_path), embedding_function=_create_embeddings())
 
         # ── 有文件删除 → 全量重建 ──
         if deleted:
@@ -185,10 +171,7 @@ def build_vectorstore(raw_data_dir=None, persist_dir=None, enable_vectorize=True
                 print(f"  - {f}")
 
             print("正在加载已有向量数据库...")
-            try:
-                vectorstore = Chroma(persist_directory=str(persist_path), embedding=_create_embeddings())
-            except TypeError:
-                vectorstore = Chroma(persist_directory=str(persist_path))
+            vectorstore = Chroma(persist_directory=str(persist_path), embedding_function=_create_embeddings())
 
             # 仅加载变更文件
             documents = _load_documents(changed_files=added_or_modified)
@@ -220,8 +203,6 @@ def build_vectorstore(raw_data_dir=None, persist_dir=None, enable_vectorize=True
 
     print("正在创建向量数据库...")
     embeddings = _create_embeddings()
-    if embeddings is None:
-        raise RuntimeError("要创建新的向量库，必须启用向量化（ENABLE_VECTORIZE=True）并提供有效的 embeddings 配置")
 
     documents = _load_documents()
     if not documents:

@@ -271,31 +271,31 @@ def test_tools():
 # ---------------------- MCP工具加载（可配置版）-----------------------
 async def load_mcp_tools(config_file: str = None):
     """
-    从配置加载MCP工具
-    
+    从配置加载MCP工具（同时返回 client，调用方必须保持 client 存活）
+
     Args:
         config_file: 可选的配置文件路径
-    
+
     Returns:
-        MCP工具列表
+        (tools, client) 元组：MCP工具列表 + MultiServerMCPClient 实例
     """
     # 加载配置
     servers_config, enabled_servers = load_mcp_config(config_file) if config_file else (MCP_SERVERS, ENABLED_SERVERS)
-    
+
     # 获取启用的服务器配置（过滤掉enabled字段）
     enabled_servers_config = get_enabled_servers(servers_config, enabled_servers)
-    
+
     if not enabled_servers_config:
         print("⚠️ 没有启用的MCP服务器")
-        return []
-    
+        return [], None
+
     try:
         print(f"📡 连接到MCP服务器: {list(enabled_servers_config.keys())}")
-        
+
         # 创建MCP客户端（只传入支持的配置）
         client = MultiServerMCPClient(enabled_servers_config)
         tools = await client.get_tools()
-        
+
         # 根据配置过滤工具
         filtered_tools = []
         for tool in tools:
@@ -303,39 +303,73 @@ async def load_mcp_tools(config_file: str = None):
                 filtered_tools.append(tool)
             else:
                 print(f"⏭️ 跳过禁用的工具: {tool.name}")
-        
+
         print(f"✅ MCP加载了 {len(filtered_tools)} 个工具")
         for tool in filtered_tools:
             print(f"   - {tool.name}: {tool.description}")
-        
-        return filtered_tools
+            print(f"     [诊断] type={type(tool).__name__}, has_ainvoke={hasattr(tool, 'ainvoke')}, has_invoke={hasattr(tool, 'invoke')}")
+            if hasattr(tool, 'args_schema') and tool.args_schema:
+                try:
+                    print(f"     [诊断] args_schema={tool.args_schema.schema()}")
+                except Exception:
+                    print(f"     [诊断] args_schema={tool.args_schema}")
+
+        return filtered_tools, client
     except Exception as e:
         print(f"❌ MCP工具加载失败: {e}")
         import traceback
         traceback.print_exc()
-        return []
+        return [], None
 
 from langchain.agents import create_agent 
 
 # ---------------------- 创建带工具的Agent（支持MCP）-----------------------
-async def create_agent_with_tools(llm, use_mcp: bool = True, mcp_config_file: str = None ):
+async def create_agent_with_tools(llm, use_mcp: bool = True, mcp_config_file: str = None, retriever=None):
     """
     创建带有工具的Agent
-    
+
     Args:
         llm: 语言模型
         use_mcp: 是否使用MCP工具
         mcp_config_file: MCP配置文件路径
-        verbose: 是否打印详细执行过程
+        retriever: 可选的 RAG 检索器，用于知识库检索增强
+
+    Returns:
+        (agent, tools, mcp_client) 元组。mcp_client 必须保持存活以确保工具可用。
     """
     all_tools = []
     filtered_local_tools = []
     mcp_tools = []
+    mcp_client = None
+
+    # 0. 如果提供了 retriever，封装为 RAG 检索工具
+    if retriever is not None:
+        from langchain_core.tools import tool as lc_tool
+
+        @lc_tool
+        def search_knowledge_base(query: str) -> str:
+            """
+            在知识库中检索相关文档内容。当需要查找事实、概念、文档中的具体信息时使用。
+            Args:
+                query: 检索查询词
+            Returns:
+                检索到的相关文档内容
+            """
+            docs = retriever.invoke(query)
+            if not docs:
+                return "知识库中未找到相关信息"
+            return "\n\n---\n\n".join(
+                f"[来源: {doc.metadata.get('source', '未知')}]\n{doc.page_content}"
+                for doc in docs
+            )
+
+        all_tools.append(search_knowledge_base)
+        print("✅ RAG 检索工具已注入 Agent")
 
     # 1. 如果启用 MCP，则优先加载 MCP 工具
     if use_mcp:
         try:
-            mcp_tools = await load_mcp_tools(mcp_config_file)
+            mcp_tools, mcp_client = await load_mcp_tools(mcp_config_file)
             if mcp_tools:
                 all_tools.extend(mcp_tools)
             print(f"✅ MCP工具已加载: {len(mcp_tools)} 个工具")
@@ -356,19 +390,18 @@ async def create_agent_with_tools(llm, use_mcp: bool = True, mcp_config_file: st
     # 3. 如果仍然没有工具，则返回失败
     if not all_tools:
         print("⚠️ 没有可用的工具，Agent将无法调用工具")
-        return None, []
+        return None, [], mcp_client
 
     system_prompt = """
-                你是一个有帮助的助手。
-                优先使用 MCP 工具来回答用户问题，只有当 MCP 工具不适用时，才考虑其他本地工具。
+                你是一个严格执行指令的助手，只能使用工具返回的精确数据回答问题。
 
                 工具名称：{tool_names}
 
-                使用说明：
-                1. 首先检查问题是否可以由 MCP 工具回答。
-                2. 如果可以，优先调用 MCP 工具。
-                3. 如果无法调用 MCP 工具，则使用本地工具。
-                4. 不要随意编造答案，必须基于工具返回结果回答。
+                核心规则（必须严格遵守）：
+                1. 收到工具返回结果后，必须原样呈现其中的数据，**严禁修改、猜测或编造任何数字、名称和事实**。
+                2. 例如：工具返回"25°C"，你不能说"18°C"或"大约20°C"。
+                3. 如果工具返回的内容已经完整，直接输出原文即可，无需"润色"。
+                4. 如果问题涉及文档查找，优先使用 search_knowledge_base 检索。
             """
 
     # 尝试用 bind_tools 绑定工具，尤其是 MCP StructuredTool 需要 async 支持
@@ -381,12 +414,18 @@ async def create_agent_with_tools(llm, use_mcp: bool = True, mcp_config_file: st
             print(f"⚠️ LLM bind_tools 失败：{e}")
 
     agent_model = llm_with_tools if llm_with_tools is not None else llm
+
+    print(f"\n[诊断] 创建 Agent，传入工具共 {len(all_tools)} 个:")
+    for t in all_tools:
+        print(f"  - name={t.name}, type={type(t).__name__}, has_ainvoke={hasattr(t, 'ainvoke')}, has_invoke={hasattr(t, 'invoke')}")
+
     agent = create_agent(
         llm_with_tools,
         tools=all_tools,
         system_prompt=system_prompt
     )
-    return agent, all_tools
+    print(f"[诊断] Agent 创建完成，type={type(agent).__name__}")
+    return agent, all_tools, mcp_client
 
 # ---------------------- 异步MCP工具测试 ----------------------
 async def test_mcp_tools_async(config_file: str = None):
@@ -395,7 +434,7 @@ async def test_mcp_tools_async(config_file: str = None):
     print("测试MCP工具（异步）")
     print("="*50)
     
-    tools = await load_mcp_tools(config_file)
+    tools, _ = await load_mcp_tools(config_file)
     
     if not tools:
         print("没有加载到MCP工具")
