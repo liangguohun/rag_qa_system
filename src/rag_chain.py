@@ -1,6 +1,6 @@
 # 修复：文本分割器新路径
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 
 # ✅ 新版 Ollama 包（无废弃警告）
 from langchain_ollama import OllamaEmbeddings, OllamaLLM
@@ -16,6 +16,7 @@ from langchain_core.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
 
 from zhipuai import ZhipuAI  # 官方SDK
+import json
 
 
 # mcp 接入修改
@@ -27,81 +28,10 @@ ROOT = Path(__file__).parent.parent
 # from langchain.agents import create_agent
 
 from config.settings import *
+from src.vectorstore_builder import build_vectorstore
 import requests
 import os
 import shutil
-
-# ---------------------- 修复版的智谱 Embedding ----------------------
-class SafeZhipuEmbeddings:
-    def __init__(self, api_key: str, model: str = "embedding-2"):
-        self.client = ZhipuAI(api_key=api_key, base_url = "https://open.bigmodel.cn/api/paas/v4/")
-        self.model = model
-    
-    def _clean_text(self, text: str) -> str:
-        """清理和截断文本"""
-        if not text or not isinstance(text, str):
-            return ""
-        # 去除首尾空白，限制长度（embedding-2 最大 512 tokens，约 1000-1500 字符）
-        cleaned = text.strip()[:1500]
-        return cleaned
-    
-    def embed_documents(self, texts):
-        """批量向量化文档"""
-        # 过滤空文本并清理
-        safe_texts = []
-        for t in texts:
-            cleaned = self._clean_text(t)
-            if cleaned:  # 只添加非空文本
-                safe_texts.append(cleaned)
-        
-        if not safe_texts:
-            print("警告：没有有效的文本需要向量化")
-            return []
-        
-        try:
-            # 批量处理，每次最多 32 条（API 限制）
-            batch_size = 32
-            all_embeddings = []
-            
-            for i in range(0, len(safe_texts), batch_size):
-                batch = safe_texts[i:i+batch_size]
-                print(f"正在向量化第 {i//batch_size + 1} 批，共 {len(batch)} 条文本")
-                
-                resp = self.client.embeddings.create(
-                    model=self.model,
-                    input=batch
-                )
-                
-                # 提取 embeddings，确保顺序正确
-                batch_embeddings = [item.embedding for item in resp.data]
-                all_embeddings.extend(batch_embeddings)
-            
-            print(f"成功向量化 {len(all_embeddings)} 条文本")
-            return all_embeddings
-            
-        except Exception as e:
-            print(f"Embedding调用失败：{e}")
-            # 打印更多错误信息用于调试
-            if hasattr(e, 'response'):
-                print(f"响应内容：{e.response.text}")
-            raise
-    
-    def embed_query(self, text):
-        """向量化单个查询"""
-        cleaned = self._clean_text(text)
-        if not cleaned:
-            raise ValueError("查询文本为空")
-        
-        try:
-            resp = self.client.embeddings.create(
-                model=self.model,
-                input=[cleaned]  # 注意：必须是列表格式
-            )
-            return resp.data[0].embedding
-        except Exception as e:
-            print(f"查询向量化失败：{e}")
-            raise
-
 
 # 写死tools 的写法用例
 '''
@@ -452,7 +382,7 @@ async def create_agent_with_tools(llm, use_mcp: bool = True, mcp_config_file: st
 
     agent_model = llm_with_tools if llm_with_tools is not None else llm
     agent = create_agent(
-        model=agent_model,
+        llm_with_tools,
         tools=all_tools,
         system_prompt=system_prompt
     )
@@ -484,159 +414,29 @@ async def test_mcp_tools_async(config_file: str = None):
         except Exception as e:
             print(f"调用失败: {e}")
 
-
-def build_vectorstore(chunks, embeddings=None, persist_dir=None, enable_vectorize=True, force_rebuild=False):
-    """
-    根据配置创建或加载向量数据库。
-
-    Args:
-        chunks: 要索引的文档块列表
-        embeddings: embedding 对象（需兼容 Chroma API）
-        persist_dir: 向量库持久化目录（Path 或 str）
-        enable_vectorize: 是否允许在没有持久化库时进行向量化并创建库
-        force_rebuild: 如果为 True，则删除已有库并重新构建
-
-    Returns:
-        vectorstore 实例（Chroma）
-    """
-    from pathlib import Path
-
-    if persist_dir is None:
-        raise ValueError("persist_dir 不能为空")
-    persist_path = Path(persist_dir)
-
-    # 如果不允许向量化，只能尝试加载已有持久化库
-    if not enable_vectorize:
-        if persist_path.exists() and any(persist_path.iterdir()):
-            print("向量化被禁用；加载已有向量数据库")
-            # 尝试不传 embedding（仅加载已持久化的数据库）
-            try:
-                return Chroma(persist_directory=str(persist_path))
-            except TypeError:
-                # 兼容旧版 API
-                return Chroma(persist_directory=str(persist_path), embedding=embeddings)
-        else:
-            raise RuntimeError(
-                "向量化已被禁用，且未找到持久化向量数据库。请启用向量化或先构建向量库。"
-            )
-
-    # enable_vectorize == True: 根据是否存在库和是否强制重建决定行为
-    if persist_path.exists() and any(persist_path.iterdir()):
-        if force_rebuild:
-            print("检测到已有向量数据库，已设置强制重建，正在删除旧库...")
-            try:
-                shutil.rmtree(persist_path)
-            except Exception as e:
-                print(f"删除旧向量库失败：{e}")
-        else:
-            print("检测到已有向量数据库，直接加载（未强制重建）")
-            try:
-                return Chroma(persist_directory=str(persist_path))
-            except TypeError:
-                return Chroma(persist_directory=str(persist_path), embedding=embeddings)
-
-    # 创建新的向量库
-    print("正在创建向量数据库...")
-    if embeddings is None:
-        raise RuntimeError("要创建新的向量库，必须提供 embeddings 实例")
-
-    vectorstore = Chroma.from_documents(
-        documents=chunks,
-        embedding=embeddings,
-        persist_directory=str(persist_path)
-    )
-    print("向量数据库创建完成")
-    return vectorstore
-
 def create_rag_chain():
     """创建 RAG 链（LangChain v1.0+ 无警告版）"""
-    
-    # 1. 加载文档
-    from src.loaders import load_documents_from_directory
-    documents = load_documents_from_directory(RAW_DATA_DIR)
-    
-    # 检查文档是否为空
-    if not documents:
-        raise ValueError(f"在 {RAW_DATA_DIR} 中没有找到任何文档")
-    
-    print(f"加载了 {len(documents)} 个文档")
-    
-    # 2. 分块
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
-        separators=["\n\n", "\n", "。", "！", "？", "；", "，", " ", ""]
-    )
-    chunks = text_splitter.split_documents(documents)
-    
-    if not chunks:
-        raise ValueError("文档分块后为空")
-    
-    print(f"文档分块为 {len(chunks)} 个块")
-    
-    # 3. 向量化（在 ENABLE_VECTORIZE 控制下创建 embeddings，避免不必要的 token 消耗）
-    embeddings = None
-    if ENABLE_VECTORIZE:
-        if USE_LOCAL_LLM:
-            # ✅ 新版 Ollama 嵌入模型（无废弃警告）
-            embeddings = OllamaEmbeddings(model=LOCAL_EMBEDDING_MODEL)
-            # 本地模型 - 使用Ollama但不支持bind_tools
-            from langchain_ollama import ChatOllama
-            llm = ChatOllama(
-                model=LOCAL_LLM_MODEL,
-                temperature=TEMPERATURE,
-            )
-        else:
-            # 使用修复后的智谱 Embedding（实际向量化在 Chroma.from_documents 时触发）
-            embeddings = SafeZhipuEmbeddings(
-                api_key=ZHIPU_API_KEY,
-                model=ZHIPU_EMBEDDING_MODEL
-            )
-            llm = ChatOpenAI(
-                api_key=ZHIPU_API_KEY,
-                model=ZHIPU_MODEL_NAME,
-                temperature=TEMPERATURE,
-                base_url="https://open.bigmodel.cn/api/paas/v4/",
-            )
+
+    # 1. 准备 LLM（embeddings 由 build_vectorstore 内部按需创建）
+    if USE_LOCAL_LLM:
+        from langchain_ollama import ChatOllama
+        llm = ChatOllama(model=LOCAL_LLM_MODEL, temperature=TEMPERATURE)
     else:
-        # 不进行向量化时仍需创建 LLM 用于生成（但避免创建 embeddings）
-        if USE_LOCAL_LLM:
-            from langchain_ollama import ChatOllama
-            llm = ChatOllama(
-                model=LOCAL_LLM_MODEL,
-                temperature=TEMPERATURE,
-            )
-        else:
-            llm = ChatOpenAI(
-                api_key=ZHIPU_API_KEY,
-                model=ZHIPU_MODEL_NAME,
-                temperature=TEMPERATURE,
-                base_url="https://open.bigmodel.cn/api/paas/v4/",
-            )
+        llm = ChatOpenAI(
+            api_key=ZHIPU_API_KEY,
+            model=ZHIPU_MODEL_NAME,
+            temperature=TEMPERATURE,
+            base_url="https://open.bigmodel.cn/api/paas/v4/",
+        )
 
-        # # 1. 测试网络连通性
-        # try:
-        #     response = requests.get("https://open.bigmodel.cn/api/paas/v4/", timeout=5)
-        #     print(f"网络连通性: {response.status_code}")
-        # except Exception as e:
-        #     print(f"网络错误: {e}")
-
-        # # 2. 测试SSL证书
-        # try:
-        #     response = requests.get("https://open.bigmodel.cn", verify=True)
-        #     print("SSL证书验证通过")
-        # except Exception as e:
-        #     print(f"SSL错误: {e}")
-        #     print("尝试跳过SSL验证...")
-        #     response = requests.get("https://open.bigmodel.cn", verify=False)
-        #     print("跳过SSL验证后连接成功")
-    # 4. 创建或加载向量库（使用封装函数，受配置开关控制）
+    # 2. 创建或加载向量库（build_vectorstore 仅在 ENABLE_VECTORIZE=True 且有变更/新文件时创建 embeddings）
     vectorstore = build_vectorstore(
-        chunks=chunks,
-        embeddings=embeddings,
+        raw_data_dir=RAW_DATA_DIR,
         persist_dir=VECTOR_STORE_DIR,
         enable_vectorize=ENABLE_VECTORIZE,
         force_rebuild=FORCE_REBUILD_VECTORSTORE,
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
     )
 
     retriever = vectorstore.as_retriever(search_kwargs={"k": RETRIEVAL_K})

@@ -38,3 +38,5 @@ packaging==24.2
 mcp
 langchain-mcp-adapters==0.2.1
 fastmcp==2.0.0
+
+langchain_chroma

@@ -292,7 +292,7 @@ def test_mcp():
         print("="*50)
         
         test_questions = [
-            "vue3 reactor 使用细节及详解",
+            "调用 get_current_time 获取当前时间",
             "帮我计算 25 * 4 + 10",
             "LangChain 这个单词文本长度？",
             "北京今天天气怎么样？",
