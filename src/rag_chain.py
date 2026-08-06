@@ -20,10 +20,8 @@ import json
 
 
 # mcp 接入修改
-from langchain_mcp_adapters.client import MultiServerMCPClient
 from config.mcp_config import MCP_SERVERS, ENABLED_SERVERS, load_mcp_config, get_enabled_servers, ENABLED_TOOLS
 from pathlib import Path
-import sys
 ROOT = Path(__file__).parent.parent
 # from langchain.agents import create_agent
 
@@ -268,10 +266,12 @@ def test_tools():
 '''
 
 
-# ---------------------- MCP工具加载（可配置版）-----------------------
+# ---------------------- MCP工具加载（委托到 src.graph.tools_registry）-----------------------
 async def load_mcp_tools(config_file: str = None):
     """
-    从配置加载MCP工具（同时返回 client，调用方必须保持 client 存活）
+    从配置加载MCP工具（同时返回 client，调用方必须保持 client 存活）。
+
+    委托到 src.graph.tools_registry.load_mcp_tools 以保持单点维护。
 
     Args:
         config_file: 可选的配置文件路径
@@ -279,153 +279,74 @@ async def load_mcp_tools(config_file: str = None):
     Returns:
         (tools, client) 元组：MCP工具列表 + MultiServerMCPClient 实例
     """
-    # 加载配置
-    servers_config, enabled_servers = load_mcp_config(config_file) if config_file else (MCP_SERVERS, ENABLED_SERVERS)
+    from src.graph.tools_registry import load_mcp_tools as _load
+    return await _load(config_file)
 
-    # 获取启用的服务器配置（过滤掉enabled字段）
-    enabled_servers_config = get_enabled_servers(servers_config, enabled_servers)
-
-    if not enabled_servers_config:
-        print("⚠️ 没有启用的MCP服务器")
-        return [], None
-
-    try:
-        print(f"📡 连接到MCP服务器: {list(enabled_servers_config.keys())}")
-
-        # 创建MCP客户端（只传入支持的配置）
-        client = MultiServerMCPClient(enabled_servers_config)
-        tools = await client.get_tools()
-
-        # 根据配置过滤工具
-        filtered_tools = []
-        for tool in tools:
-            if ENABLED_TOOLS.get(tool.name, True):
-                filtered_tools.append(tool)
-            else:
-                print(f"⏭️ 跳过禁用的工具: {tool.name}")
-
-        print(f"✅ MCP加载了 {len(filtered_tools)} 个工具")
-        for tool in filtered_tools:
-            print(f"   - {tool.name}: {tool.description}")
-            print(f"     [诊断] type={type(tool).__name__}, has_ainvoke={hasattr(tool, 'ainvoke')}, has_invoke={hasattr(tool, 'invoke')}")
-            if hasattr(tool, 'args_schema') and tool.args_schema:
-                try:
-                    print(f"     [诊断] args_schema={tool.args_schema.schema()}")
-                except Exception:
-                    print(f"     [诊断] args_schema={tool.args_schema}")
-
-        return filtered_tools, client
-    except Exception as e:
-        print(f"❌ MCP工具加载失败: {e}")
-        import traceback
-        traceback.print_exc()
-        return [], None
-
-from langchain.agents import create_agent 
-
-# ---------------------- 创建带工具的Agent（支持MCP）-----------------------
+# ---------------------- 创建带工具的Agent（基于 LangGraph 显式状态图）-----------------------
 async def create_agent_with_tools(llm, use_mcp: bool = True, mcp_config_file: str = None, retriever=None):
     """
-    创建带有工具的Agent
+    使用 LangGraph 显式状态图创建 ReAct Agent。
+
+    内部使用 src.graph 模块:
+      ToolRegistry      → 管理三层工具栈（MCP → RAG → 本地）
+      build_agent_graph → 编译 StateGraph（节点 + 条件边 + 检查点）
+
+    图结构（ReAct 循环）:
+      START → agent(LLM推理) → {有tool_calls? → tools(执行) → agent} → END
 
     Args:
-        llm: 语言模型
-        use_mcp: 是否使用MCP工具
-        mcp_config_file: MCP配置文件路径
-        retriever: 可选的 RAG 检索器，用于知识库检索增强
+        llm:             语言模型实例
+        use_mcp:         是否加载 MCP 远程工具
+        mcp_config_file: MCP 配置文件路径
+        retriever:       RAG 检索器（可选）
 
     Returns:
-        (agent, tools, mcp_client) 元组。mcp_client 必须保持存活以确保工具可用。
+        (agent, tools, mcp_client) 元组
+        - agent:      CompiledStateGraph，支持 .invoke() / .ainvoke()
+        - tools:      所有工具列表
+        - mcp_client: MCP 客户端（调用方需持有以保持连接）
     """
-    all_tools = []
-    filtered_local_tools = []
-    mcp_tools = []
-    mcp_client = None
+    from src.graph import ToolRegistry, build_agent_graph
 
-    # 0. 如果提供了 retriever，封装为 RAG 检索工具
-    if retriever is not None:
-        from langchain_core.tools import tool as lc_tool
-
-        @lc_tool
-        def search_knowledge_base(query: str) -> str:
-            """
-            在知识库中检索相关文档内容。当需要查找事实、概念、文档中的具体信息时使用。
-            Args:
-                query: 检索查询词
-            Returns:
-                检索到的相关文档内容
-            """
-            docs = retriever.invoke(query)
-            if not docs:
-                return "知识库中未找到相关信息"
-            return "\n\n---\n\n".join(
-                f"[来源: {doc.metadata.get('source', '未知')}]\n{doc.page_content}"
-                for doc in docs
-            )
-
-        all_tools.append(search_knowledge_base)
-        print("✅ RAG 检索工具已注入 Agent")
-
-    # 1. 如果启用 MCP，则优先加载 MCP 工具
-    if use_mcp:
-        try:
-            mcp_tools, mcp_client = await load_mcp_tools(mcp_config_file)
-            if mcp_tools:
-                all_tools.extend(mcp_tools)
-            print(f"✅ MCP工具已加载: {len(mcp_tools)} 个工具")
-        except Exception as e:
-            print(f"⚠️ MCP工具加载失败: {e}，将尝试加载本地工具")
-
-    # 2. 如果没有加载到 MCP 工具，则回退到本地工具
-    if not all_tools:
-        print("⚠️ 未加载到 MCP 工具，使用本地工具作为后备")
-        local_tools = ALL_SKILLS
-        filtered_local_tools = [
-            tool for tool in local_tools
-            if ENABLED_TOOLS.get(tool.name, True)
-        ]
-        all_tools.extend(filtered_local_tools)
-        print(f"✅ 本地工具已加载: {len(filtered_local_tools)} 个工具")
-
-    # 3. 如果仍然没有工具，则返回失败
-    if not all_tools:
-        print("⚠️ 没有可用的工具，Agent将无法调用工具")
-        return None, [], mcp_client
-
-    system_prompt = """
-                你是一个严格执行指令的助手，只能使用工具返回的精确数据回答问题。
-
-                工具名称：{tool_names}
-
-                核心规则（必须严格遵守）：
-                1. 收到工具返回结果后，必须原样呈现其中的数据，**严禁修改、猜测或编造任何数字、名称和事实**。
-                2. 例如：工具返回"25°C"，你不能说"18°C"或"大约20°C"。
-                3. 如果工具返回的内容已经完整，直接输出原文即可，无需"润色"。
-                4. 如果问题涉及文档查找，优先使用 search_knowledge_base 检索。
-            """
-
-    # 尝试用 bind_tools 绑定工具，尤其是 MCP StructuredTool 需要 async 支持
-    llm_with_tools = None
-    if hasattr(llm, "bind_tools"):
-        try:
-            llm_with_tools = llm.bind_tools(all_tools)
-            print("✅ LLM bind_tools 成功，可支持 StructuredTool 异步调用")
-        except Exception as e:
-            print(f"⚠️ LLM bind_tools 失败：{e}")
-
-    agent_model = llm_with_tools if llm_with_tools is not None else llm
-
-    print(f"\n[诊断] 创建 Agent，传入工具共 {len(all_tools)} 个:")
-    for t in all_tools:
-        print(f"  - name={t.name}, type={type(t).__name__}, has_ainvoke={hasattr(t, 'ainvoke')}, has_invoke={hasattr(t, 'invoke')}")
-
-    agent = create_agent(
-        llm_with_tools,
-        tools=all_tools,
-        system_prompt=system_prompt
+    # ── 1. 初始化工具注册中心，按优先级加载三层工具 ──
+    registry = ToolRegistry()
+    await registry.initialize(
+        use_mcp=use_mcp,
+        mcp_config_file=mcp_config_file,
+        retriever=retriever,
     )
-    print(f"[诊断] Agent 创建完成，type={type(agent).__name__}")
-    return agent, all_tools, mcp_client
+
+    all_tools = registry.get_all_tools()
+    if not all_tools:
+        print("⚠️ 没有可用的工具，Agent 将无法调用工具")
+        return None, [], registry.mcp_client
+
+    # ── 2. 构建 system_prompt ──
+    tool_names = ", ".join(t.name for t in all_tools)
+    system_prompt = f"""
+你是一个严格执行指令的助手，只能使用工具返回的精确数据回答问题。
+
+可用工具: {tool_names}
+
+核心规则（必须严格遵守）:
+1. 收到工具返回结果后，必须原样呈现其中的数据，严禁修改、猜测或编造任何数字、名称和事实。
+2. 例如: 工具返回"25°C"，你不能说"18°C"或"大约20°C"。
+3. 如果工具返回的内容已经完整，直接输出原文即可，无需"润色"。
+4. 如果问题涉及文档查找，优先使用 search_knowledge_base 检索。
+"""
+
+    # ── 3. 构建 LangGraph 状态图 ──
+    agent = build_agent_graph(
+        llm=llm,
+        tool_registry=registry,
+        system_prompt=system_prompt,
+        async_mode=True,
+    )
+
+    print(f"[AgentFactory] Agent 创建完成, 工具={len(all_tools)}, "
+          f"type={type(agent).__name__}")
+
+    return agent, all_tools, registry.mcp_client
 
 # ---------------------- 异步MCP工具测试 ----------------------
 async def test_mcp_tools_async(config_file: str = None):

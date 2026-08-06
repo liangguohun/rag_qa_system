@@ -14,14 +14,27 @@ from typing import Optional
 
 # 🔥 关键：用线程运行，不让 LLM 卡住异步
 import asyncio
+import uuid
 
 
-async def invoke_agent(agent, payload):
-    """异步调用 Agent（用于已在事件循环中的场景）。"""
+def _agent_config(thread_id: str = None) -> dict:
+    """生成 Agent 调用所需的 config（含 thread_id，供 checkpointer 使用）。"""
+    return {"configurable": {"thread_id": thread_id or uuid.uuid4().hex}}
+
+
+async def invoke_agent(agent, payload, thread_id: str = None):
+    """异步调用 Agent（用于已在事件循环中的场景）。
+    
+    Args:
+        agent:    CompiledStateGraph 实例
+        payload:  {"messages": [...]}
+        thread_id: 会话标识（checkpointer 需要）。不传则自动生成 UUID。
+    """
+    config = _agent_config(thread_id)
     if hasattr(agent, "ainvoke"):
-        return await agent.ainvoke(payload)
+        return await agent.ainvoke(payload, config=config)
     if hasattr(agent, "invoke"):
-        return await asyncio.to_thread(agent.invoke, payload)
+        return await asyncio.to_thread(agent.invoke, payload, config=config)
     raise RuntimeError("当前 Agent 不支持 invoke 或 ainvoke")
 
 
@@ -59,12 +72,13 @@ def extract_tool_answer(response: dict) -> str:
     return "无法获取回答"
 
 
-def invoke_agent_sync(agent, payload):
+def invoke_agent_sync(agent, payload, thread_id: str = None):
     """同步调用 Agent（用于线程 / 非事件循环场景）。"""
+    config = _agent_config(thread_id)
     if hasattr(agent, "ainvoke"):
-        return asyncio.run(agent.ainvoke(payload))
+        return asyncio.run(agent.ainvoke(payload, config=config))
     if hasattr(agent, "invoke"):
-        return agent.invoke(payload)
+        return agent.invoke(payload, config=config)
     raise RuntimeError("当前 Agent 不支持 invoke 或 ainvoke")
 
 # ===================== 新版 FastAPI 生命周期（无废弃警告）=====================
