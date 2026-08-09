@@ -7,7 +7,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 
 from config.settings import RAW_DATA_DIR, CHUNK_SIZE, CHUNK_OVERLAP, \
-    USE_LOCAL_LLM, LOCAL_EMBEDDING_MODEL, ZHIPU_API_KEY, ZHIPU_EMBEDDING_MODEL
+    USE_LOCAL_EMBEDDING, LOCAL_EMBEDDING_MODEL, ZHIPU_API_KEY, ZHIPU_EMBEDDING_MODEL
 from src.loaders import load_documents_from_directory
 
 
@@ -43,9 +43,10 @@ def build_vectorstore(raw_data_dir=None, persist_dir=None, enable_vectorize=True
         nonlocal _embeddings_cache
         if _embeddings_cache is not None:
             return _embeddings_cache
-        if USE_LOCAL_LLM:
+        if USE_LOCAL_EMBEDDING:
             from langchain_ollama import OllamaEmbeddings
             _embeddings_cache = OllamaEmbeddings(model=LOCAL_EMBEDDING_MODEL)
+            print(f"[Embedding] 使用本地 Ollama 嵌入模型: {LOCAL_EMBEDDING_MODEL}")
         else:
             from zhipuai import ZhipuAI
             class _SafeZhipuEmbeddings:
@@ -74,6 +75,7 @@ def build_vectorstore(raw_data_dir=None, persist_dir=None, enable_vectorize=True
                     resp = self.client.embeddings.create(model=self.model, input=[cleaned])
                     return resp.data[0].embedding
             _embeddings_cache = _SafeZhipuEmbeddings(api_key=ZHIPU_API_KEY, model=ZHIPU_EMBEDDING_MODEL)
+            print(f"[Embedding] 使用智谱云端嵌入模型: {ZHIPU_EMBEDDING_MODEL}")
         return _embeddings_cache
 
     def _load_checkpoint():

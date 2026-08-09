@@ -209,6 +209,85 @@ async def load_mcp_tools(config_file: str = None):
 
 
 # ============================================================
+# Async-to-Sync 工具适配
+# ============================================================
+
+def _make_sync_compatible(tool):
+    """
+    确保工具同时支持同步调用。
+
+    背景:
+      MCP 工具（MultiServerMCPClient.get_tools()）返回的是 async-only 的
+      StructuredTool，其 _run() 直接抛 NotImplementedError。
+      当 main.py 通过 asyncio.to_thread 在子线程中同步执行 agent.invoke() 时，
+      LangGraph 的 ToolNode 会走 _execute_tool_sync 路径，触发此错误。
+
+    解决方案:
+      对 async-only 工具补上同步包装器，在子线程中用 asyncio.run() 执行。
+      由于主线程通过 asyncio.to_thread 把 agent.invoke 调度到子线程，
+      子线程中不存在运行中的事件循环，直接 asyncio.run() 是安全且高效的。
+
+    Args:
+        tool: 原始工具实例
+
+    Returns:
+        支持同步和异步调用的工具（已是同步兼容的则原样返回）
+    """
+    if not isinstance(tool, StructuredTool):
+        return tool
+
+    # ── 检测是否为 async-only 工具 ──
+    # 方法：读取 _run 的源码，直接匹配基类的 NotImplementedError 实现。
+    # 本地 @tool 装饰的工具 _run 源码以 "def _run(" 或 lambda 开头，
+    # MCP async 工具则继承基类以 "raise NotImplementedError" 开头。
+    import inspect
+    try:
+        source = inspect.getsource(tool._run)
+    except (OSError, TypeError):
+        return tool  # 无法获取源码，不做包装
+
+    if "NotImplementedError" not in source:
+        return tool  # 有自己的同步实现
+
+    # async-only 工具：用 asyncio.run() 包装 ainvoke（而非直接调 _arun）
+    # _arun 有固定的 keyword-only 参数签名，直接 *args/**kwargs 无法正确传递；
+    # ainvoke(input, config) 是稳定的公共接口。
+    _orig_tool = tool  # 闭包引用
+
+    def _sync_runner(*args, **kwargs):
+        """在子线程中运行，asyncio.run() 是安全的。
+        
+        LangGraph ToolNode 调用路径：
+          tool.invoke(call_args_dict, config=config)
+            → tool.run(input_dict, config=config)
+              → _sync_runner(**input_dict) 或 _sync_runner(*args)
+        
+        我们需要把 input 和 config 都传给 ainvoke。
+        """
+        # LangGraph 调用时通常只有一个 dict 参数（工具入参）
+        # config 通过 **kwargs 或单独传入
+        if len(args) == 1 and isinstance(args[0], dict) and not kwargs:
+            # 最常见路径: tool.invoke({"format_type": "full"})
+            return asyncio.run(_orig_tool.ainvoke(args[0]))
+        elif len(args) == 1 and isinstance(args[0], dict) and kwargs:
+            # 带 config: tool.invoke({"format_type": "full"}, config=...)
+            return asyncio.run(_orig_tool.ainvoke(args[0], **kwargs))
+        elif len(args) == 0 and kwargs:
+            return asyncio.run(_orig_tool.ainvoke(kwargs))
+        else:
+            return asyncio.run(_orig_tool.ainvoke({"args": str(args), "kwargs": str(kwargs)}))
+
+    print(f"[ToolRegistry] 包装 MCP async 工具: {tool.name}")
+    return StructuredTool.from_function(
+        func=_sync_runner,
+        name=tool.name,
+        description=tool.description,
+        args_schema=tool.args_schema,
+        return_direct=tool.return_direct,
+    )
+
+
+# ============================================================
 # 工具注册中心
 # ============================================================
 
@@ -277,7 +356,9 @@ class ToolRegistry:
         mcp_names = {t.name for t in self._mcp_tools}
 
         tools: list = []
-        tools.extend(self._mcp_tools)  # 最高优先级
+        # MCP 工具必须做 async→sync 适配，否则 LangGraph 在子线程同步执行时会报错
+        # "StructuredTool does not support sync invocation"
+        tools.extend(_make_sync_compatible(t) for t in self._mcp_tools)
 
         if self._rag_tool:
             tools.append(self._rag_tool)

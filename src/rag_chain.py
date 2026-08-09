@@ -336,11 +336,23 @@ async def create_agent_with_tools(llm, use_mcp: bool = True, mcp_config_file: st
 """
 
     # ── 3. 构建 LangGraph 状态图 ──
+    # 创建 Redis Checkpointer（生产环境持久化，支持断点恢复和人工介入）
+    from src.graph.graph_builder import create_redis_checkpointer
+
+    redis_checkpointer = create_redis_checkpointer(
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        password=REDIS_PASSWORD,
+        db=REDIS_DB,
+        checkpoint_prefix=REDIS_CHECKPOINT_PREFIX,
+    )
+
     agent = build_agent_graph(
         llm=llm,
         tool_registry=registry,
         system_prompt=system_prompt,
-        async_mode=True,
+        checkpointer=redis_checkpointer,
+        async_mode=False,
     )
 
     print(f"[AgentFactory] Agent 创建完成, 工具={len(all_tools)}, "
@@ -389,7 +401,11 @@ def create_rag_chain():
             base_url="https://open.bigmodel.cn/api/paas/v4/",
         )
 
-    # 2. 创建或加载向量库（build_vectorstore 仅在 ENABLE_VECTORIZE=True 且有变更/新文件时创建 embeddings）
+    # 2. RAG 检索总开关：关闭则完全跳过向量库，不调用 embedding API
+    if not ENABLE_RAG_RETRIEVAL:
+        print("[RAG] ENABLE_RAG_RETRIEVAL=False，跳过向量库加载（不会调用 embedding API）")
+        return None, None, llm
+
     vectorstore = build_vectorstore(
         raw_data_dir=RAW_DATA_DIR,
         persist_dir=VECTOR_STORE_DIR,

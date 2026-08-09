@@ -47,9 +47,19 @@ ReAct 是一种将"推理"和"行动"交织进行的 Agent 范式:
   - 可流式:   支持逐 token 流式输出
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Checkpointer 持久化策略
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  InMemorySaver → 内存存储（开发/测试用，重启丢失）
+  RedisSaver    → Redis 持久化（生产用，跨进程共享，支持断点恢复）
+
+Redis Checkpointer 带来的能力:
+  - 多实例共享: 多个 API 实例连接同一 Redis，状态一致
+  - 断点恢复: 服务重启后，同一 thread_id 继续执行
+  - 人工介入: 通过 update_state() 注入审批结果后 resume
 """
 
-from typing import Optional
+from typing import Optional, Any, Union
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.prebuilt import tools_condition
@@ -63,11 +73,81 @@ from .nodes import (
 from .tools_registry import ToolRegistry
 
 
+def create_redis_checkpointer(
+    host: str = "192.168.4.60",
+    port: int = 6379,
+    password: str = "",
+    db: int = 0,
+    checkpoint_prefix: str = "langgraph:checkpoint",
+) -> "RedisSaver":
+    """
+    创建 Redis 持久化检查点保存器。
+
+    使用同步 redis.Redis 客户端创建 RedisSaver，天然线程安全，
+    不受 event loop 绑定限制。无论 graph 从同一个 loop 还是
+    asyncio.to_thread 的新 loop 调用都能正常工作。
+
+    前置条件：Redis 服务器必须加载 RedisJSON + RediSearch 模块。
+    若未加载会抛出 RedisVLError: unknown command 'JSON.SET'。
+
+    Args:
+        host:              Redis 主机地址
+        port:              Redis 端口
+        password:          Redis 密码
+        db:                Redis 数据库编号
+        checkpoint_prefix: 键前缀（多服务共享 Redis 时隔离）
+
+    Returns:
+        RedisSaver 实例
+    """
+    import redis
+    from langgraph.checkpoint.redis import RedisSaver
+
+    redis_client = redis.Redis(
+        host=host,
+        port=port,
+        password=password or None,
+        db=db,
+        decode_responses=False,
+        socket_connect_timeout=5,
+    )
+    saver = RedisSaver(
+        redis_client=redis_client,
+        checkpoint_prefix=checkpoint_prefix,
+    )
+    print(f"[RedisCheckpointer] 已连接 Redis {host}:{port}/{db}")
+    return saver
+
+
+def create_sqlite_checkpointer(
+    db_path: str = "checkpoints.db",
+) -> "SqliteSaver":
+    """
+    创建 SQLite 持久化检查点保存器（零外部依赖，无需 RedisJSON 模块）。
+
+    适用场景：
+      - Redis 服务器未加载 RedisJSON/RediSearch 模块
+      - 单机部署，不需要跨进程共享 checkpoint
+      - 快速开发/测试
+
+    Args:
+        db_path: SQLite 数据库文件路径
+
+    Returns:
+        SqliteSaver 实例
+    """
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    saver = SqliteSaver.from_conn_string(db_path)
+    print(f"[SqliteCheckpointer] 已连接 SQLite {db_path}")
+    return saver
+
+
 def build_agent_graph(
     llm,
     tool_registry: ToolRegistry,
     system_prompt: str = "",
-    checkpointer: Optional[InMemorySaver] = None,
+    checkpointer: Any = None,   # InMemorySaver | RedisSaver | None（自动 InMemory）
     async_mode: bool = True,
 ):
     """

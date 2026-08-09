@@ -24,17 +24,20 @@ def _agent_config(thread_id: str = None) -> dict:
 
 async def invoke_agent(agent, payload, thread_id: str = None):
     """异步调用 Agent（用于已在事件循环中的场景）。
-    
+
+    使用 asyncio.to_thread 在独立线程中执行 sync invoke()，
+    避免 RedisSaver 的 async 方法未实现问题（aget_tuple 等抛 NotImplementedError）。
+
     Args:
         agent:    CompiledStateGraph 实例
         payload:  {"messages": [...]}
         thread_id: 会话标识（checkpointer 需要）。不传则自动生成 UUID。
     """
     config = _agent_config(thread_id)
-    if hasattr(agent, "ainvoke"):
-        return await agent.ainvoke(payload, config=config)
     if hasattr(agent, "invoke"):
         return await asyncio.to_thread(agent.invoke, payload, config=config)
+    if hasattr(agent, "ainvoke"):
+        return await agent.ainvoke(payload, config=config)
     raise RuntimeError("当前 Agent 不支持 invoke 或 ainvoke")
 
 
@@ -73,12 +76,15 @@ def extract_tool_answer(response: dict) -> str:
 
 
 def invoke_agent_sync(agent, payload, thread_id: str = None):
-    """同步调用 Agent（用于线程 / 非事件循环场景）。"""
+    """同步调用 Agent（用于线程 / 非事件循环场景）。
+
+    直接使用 sync invoke()，避免 RedisSaver 的 async 方法未实现问题。
+    """
     config = _agent_config(thread_id)
-    if hasattr(agent, "ainvoke"):
-        return asyncio.run(agent.ainvoke(payload, config=config))
     if hasattr(agent, "invoke"):
         return agent.invoke(payload, config=config)
+    if hasattr(agent, "ainvoke"):
+        return asyncio.run(agent.ainvoke(payload, config=config))
     raise RuntimeError("当前 Agent 不支持 invoke 或 ainvoke")
 
 # ===================== 新版 FastAPI 生命周期（无废弃警告）=====================
@@ -88,7 +94,10 @@ async def lifespan(app: FastAPI):
     # 尝试初始化 RAG 链；如果失败，只打印错误并继续运行应用
     try:
         rag_chain, retriever, llm = create_rag_chain()
-        print("✅ RAG 链初始化完成")
+        if rag_chain is not None:
+            print("✅ RAG 链初始化完成")
+        else:
+            print("ℹ️  RAG 检索已关闭（ENABLE_RAG_RETRIEVAL=False），仅使用纯 LLM 对话")
 
         # 同时创建 MCP Agent，优先使用 MCP 工具
         try:
@@ -127,16 +136,16 @@ async def lifespan(app: FastAPI):
                     elif t.name == "weather_check":
                         r = await t.ainvoke({"city": "北京"}) if hasattr(t, 'ainvoke') else t.invoke({"city": "北京"})
                     else:
-                        r = await t.ainvoke({}) if hasattr(t, 'ainvoke') else t.invoke({})
+                        r = await t.ainvoke({"query": "test"}) if hasattr(t, 'ainvoke') else t.invoke({"query": "test"})
                     print(f"    ✅ {t.name} 返回: {r}")
                 except Exception as e:
                     print(f"    ❌ {t.name} 直接调用失败: {e}")
 
             test_questions = [
                 ("get_current_time", "请用 get_current_time 工具获取当前完整时间"),
-                ("calculate", "请用 calculate 工具计算 25 * 4 + 10"),
-                ("get_word_length", "请用 get_word_length 工具统计 'LangChain' 这个词的字符长度"),
-                ("weather_check", "请用 weather_check 工具查询北京的天气"),
+                # ("calculate", "请用 calculate 工具计算 25 * 4 + 10"),
+                # ("get_word_length", "请用 get_word_length 工具统计 'LangChain' 这个词的字符长度"),
+                # ("weather_check", "请用 weather_check 工具查询北京的天气"),
             ]
             for tool_name, question in test_questions:
                 print(f"\n[MCP:{tool_name}] 用户问题: {question}")
@@ -164,6 +173,8 @@ async def lifespan(app: FastAPI):
                     print("-" * 40)
                 except Exception as e:
                     print(f"Agent调用失败: {e}")
+                    import traceback
+                    traceback.print_exc()
     except Exception as e:
         print(f"RAG 链初始化失败（继续运行）：{e}")
         import traceback
