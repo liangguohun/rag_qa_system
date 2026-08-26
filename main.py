@@ -11,6 +11,8 @@ from src.rag_chain import create_rag_chain
 # test_tools, 
 from src.rag_chain import create_agent_with_tools, test_mcp_tools_async
 from typing import Optional
+# MariaDB MCP Service 启停管理（http 伴随启动 / stdio 延后启动）
+from src.mariadb_mcp_service import start_mariadb_mcp_service, stop_mariadb_mcp_service
 
 # 🔥 关键：用线程运行，不让 LLM 卡住异步
 import asyncio
@@ -90,7 +92,16 @@ def invoke_agent_sync(agent, payload, thread_id: str = None):
 # ===================== 新版 FastAPI 生命周期（无废弃警告）=====================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global rag_chain, retriever, llm, agent, agent_tools, mcp_client
+    global rag_chain, retriever, llm, agent, agent_tools, mcp_client, mariadb_mcp_proc
+    # ── MariaDB MCP Service：按 settings.py 开关管理 ──
+    #   http  → 伴随启动：拉起本地 vendor/mariadb-mcp 的 HTTP Service
+    #   stdio → 延后启动：不启动外部服务，由 Agent 调用时内嵌拉起
+    try:
+        mariadb_mcp_proc = await start_mariadb_mcp_service()
+    except Exception as e:
+        print(f"⚠️ MariaDB MCP Service 启动失败（不影响主服务）：{e}")
+        mariadb_mcp_proc = None
+
     # 尝试初始化 RAG 链；如果失败，只打印错误并继续运行应用
     try:
         rag_chain, retriever, llm = create_rag_chain()
@@ -182,6 +193,11 @@ async def lifespan(app: FastAPI):
         rag_chain, retriever, llm = None, None, None
         agent, agent_tools, mcp_client = None, [], None
     yield
+    # 关闭伴随启动的本地 MariaDB MCP HTTP Service
+    try:
+        await stop_mariadb_mcp_service(mariadb_mcp_proc)
+    except Exception as e:
+        print(f"⚠️ MariaDB MCP Service 停止异常：{e}")
     print("🛑 服务关闭")
 
 app = FastAPI(
@@ -197,6 +213,7 @@ llm = None
 agent = None
 agent_tools = []
 mcp_client = None
+mariadb_mcp_proc = None
 
 # ===================== 请求模型 =====================
 class QueryRequest(BaseModel):

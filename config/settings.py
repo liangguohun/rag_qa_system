@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -54,3 +55,41 @@ REDIS_DB = int(os.getenv("REDIS_DB", "0"))
 REDIS_URL = os.getenv("REDIS_URL", f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}")
 # LangGraph checkpoint 键前缀（多服务共享同一 Redis 时用于隔离）
 REDIS_CHECKPOINT_PREFIX = os.getenv("REDIS_CHECKPOINT_PREFIX", "langgraph:checkpoint")
+
+
+# ========== MariaDB MCP / LangGraph Agent 配置 ==========
+# 传输模式开关：手动在此指定（http / stdio）
+#   http  —— 默认。自动拉起本地 vendor/mariadb-mcp 的 MCP HTTP Service 后访问
+#   stdio —— 可选。跑内嵌 MCP 子进程（npx / uv），无需外部服务
+MARIADB_MCP_TRANSPORT = "http"
+# 数据库连接信息（透传给 MariaDB MCP Server）
+MARIADB_DB_CONFIG = {
+    "DB_HOST": os.getenv("DB_HOST", "127.0.0.1"),
+    "DB_PORT": os.getenv("DB_PORT", "3306"),
+    "DB_USER": os.getenv("DB_USER", "root"),
+    "DB_PASSWORD": os.getenv("DB_PASSWORD", "Hungexxmm.@6"),
+    "DB_NAME": os.getenv("DB_NAME", "stock"),
+}
+# stdio 模式：MCP 子进程启动命令（默认 npx 拉起；官方 Python 版可改用 uv）
+#   MARIADB_MCP_STDIO_COMMAND=uv
+#   MARIADB_MCP_STDIO_ARGS=--directory C:/path/to/mariadb-mcp run server.py
+MARIADB_MCP_STDIO_COMMAND = os.getenv("MARIADB_MCP_STDIO_COMMAND", "npx")
+MARIADB_MCP_STDIO_ARGS = os.getenv("MARIADB_MCP_STDIO_ARGS", "-y @mariadb/mcp").split()
+# streamable-http 模式：MCP 端点地址
+MARIADB_MCP_HTTP_HOST = os.getenv("MARIADB_MCP_HTTP_HOST", "127.0.0.1")
+MARIADB_MCP_HTTP_PORT = int(os.getenv("MARIADB_MCP_HTTP_PORT", "9001"))
+MARIADB_MCP_HTTP_PATH = os.getenv("MARIADB_MCP_HTTP_PATH", "/mcp")
+# 外部 HTTP 地址；留空则按 host/port/path 自动拼接
+MARIADB_MCP_HTTP_URL = os.getenv("MARIADB_MCP_HTTP_URL", "").strip()
+# 可选的请求头，JSON 格式，例如 {"Authorization": "Bearer xxx"}
+_mariadb_headers_raw = os.getenv("MARIADB_MCP_HTTP_HEADERS", "").strip()
+MARIADB_MCP_HTTP_HEADERS = json.loads(_mariadb_headers_raw) if _mariadb_headers_raw else {}
+# 官方 MariaDB/mcp 仓库目录；http 模式下脚本会自动拉起其中的本地 MCP Server
+# 默认指向项目 vendor/mariadb-mcp，可用环境变量 MARIADB_MCP_DIR 覆盖
+MARIADB_MCP_DIR = (os.getenv("MARIADB_MCP_DIR", "").strip()
+                   or str(Path(__file__).resolve().parent.parent / "vendor" / "mariadb-mcp"))
+# Agent 使用的 LLM 模型：默认与项目智谱配置一致（glm-4.7-flash）
+MARIADB_LLM_MODEL = os.getenv("MARIADB_LLM_MODEL", ZHIPU_MODEL_NAME)
+# 智谱 OpenAI 兼容接口地址
+MARIADB_LLM_BASE_URL = os.getenv("MARIADB_LLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4/")
+MARIADB_LLM_API_KEY = os.getenv("MARIADB_LLM_API_KEY", ZHIPU_API_KEY)

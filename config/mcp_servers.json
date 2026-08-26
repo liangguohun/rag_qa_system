@@ -5,6 +5,11 @@
         "transport": "stdio",
         "enabled": true
     },
+    "mariadb": {
+        "transport": "streamable_http",
+        "url": "http://127.0.0.1:9001/mcp",
+        "enabled": true
+    },
     "custom-tools": {
         "command": "python",
         "args": ["custom_mcp_server.py"],

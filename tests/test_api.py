@@ -4,7 +4,7 @@ try:
     response = requests.post(
         "http://localhost:8000/ask",
         # json={"question": "总结一下这个文档的核心观点"},
-        json={"question": "深圳天气"},
+        json={"question": "mariadb stock 库目前有那几张表"},
         # timeout=30
     )
     print("状态码:", response.status_code)
