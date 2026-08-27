@@ -1,8 +1,0 @@
-2026-08-27 00:27:35,605 - config - INFO - Selected Embedding Provider: None
-2026-08-27 00:27:35,609 - config - INFO - No EMBEDDING_PROVIDER selected or it is set to None. Disabling embedding features.
-2026-08-27 00:27:35,615 - config - INFO - Read-only mode: True
-2026-08-27 00:27:35,621 - config - INFO - Block sensitive SHOW commands: True
-2026-08-27 00:27:35,626 - config - INFO - Logging to console and to file: logs/mcp_server.log (Level: INFO, MaxSize: 10485760B, Backups: 5)
-F:\aiDemo\rag_qa_system\vendor\mariadb-mcp\.venv\Lib\site-packages\fastmcp\server\auth\providers\jwt.py:10: AuthlibDeprecationWarning: authlib.jose module is deprecated, please use joserfc instead.
-It will be compatible before version 2.0.0.
-  from authlib.jose import JsonWebKey, JsonWebToken

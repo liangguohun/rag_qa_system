@@ -13,6 +13,8 @@ import sys
 import time
 from pathlib import Path
 
+import httpx
+
 # 确保项目根目录在 sys.path 中，以导入 config 包
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
@@ -54,6 +56,58 @@ async def _port_open(host: str, port: int) -> bool:
         return False
 
 
+async def _verify_mcp_ready(host: str, port: int, path: str, timeout: float = 3.0) -> bool:
+    """发 MCP initialize 握手，确认服务真实可用。
+
+    端口能建立 TCP 连接 ≠ MCP 协议可用：残留的半死进程（能 accept 但立即
+    关闭/不响应）会让 _port_open 误判为"已有服务"，复用后 Agent 真实请求
+    才会暴露 ConnectError。这里用一次真实握手验证。
+    """
+    url = f"http://{host}:{port}{path}"
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {"name": "rag_qa_system", "version": "1.0"},
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(
+                url,
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                },
+            )
+        return resp.status_code < 500 and resp.headers.get("mcp-session-id") is not None
+    except Exception:
+        return False
+
+
+async def _kill_port_owner(port: int) -> None:
+    """杀掉占用指定端口的进程（Windows 下连带进程树），用于替换半死残留进程"""
+    if sys.platform != "win32":
+        return
+    try:
+        out = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return
+    pids = set()
+    for line in out.splitlines():
+        if f":{port}" in line and "LISTENING" in line.upper():
+            parts = line.split()
+            if parts:
+                pids.add(parts[-1])
+    for pid in pids:
+        if pid.isdigit():
+            _ = subprocess.run(["taskkill", "/PID", pid, "/T", "/F"], capture_output=True)
+
+
 async def _wait_port(host: str, port: int, timeout: float = 60.0) -> None:
     """轮询等待端口就绪"""
     start = time.monotonic()
@@ -62,6 +116,22 @@ async def _wait_port(host: str, port: int, timeout: float = 60.0) -> None:
             return
         await asyncio.sleep(0.5)
     raise TimeoutError(f"等待 MCP HTTP Server {host}:{port} 就绪超时")
+
+
+async def _wait_mcp_ready(
+    host: str, port: int, path: str, timeout: float = 60.0
+) -> bool:
+    """轮询等待 MCP initialize 握手成功。
+
+    服务进程启动后 TCP 端口可能先开，但协议层（数据库连接池等）还需
+    数秒才就绪；只握手一次易误判失败而误杀进程。这里在超时内持续轮询。
+    """
+    start = time.monotonic()
+    while time.monotonic() - start < timeout:
+        if await _verify_mcp_ready(host, port, path):
+            return True
+        await asyncio.sleep(1.0)
+    return False
 
 
 async def _terminate_process(proc: asyncio.subprocess.Process | None) -> None:
@@ -104,10 +174,14 @@ def _launch_cmd(mcp_dir: Path) -> list[str]:
 
 async def ensure_http_server() -> asyncio.subprocess.Process | None:
     """http 模式：保证本地 MariaDB MCP HTTP Service 在运行。
-    端口已占用 → 直接复用；否则自动拉起本地 vendor/mariadb-mcp 服务并等待就绪。"""
+    端口已占用且握手验证通过 → 直接复用；否则杀掉残留进程自动拉起并等待就绪。"""
     if await _port_open(MARIADB_MCP_HTTP_HOST, MARIADB_MCP_HTTP_PORT):
-        print(f"[mariadb-mcp] 检测到 MCP HTTP Service 已运行: {get_mcp_url()}，直接复用")
-        return None
+        if await _verify_mcp_ready(MARIADB_MCP_HTTP_HOST, MARIADB_MCP_HTTP_PORT, MARIADB_MCP_HTTP_PATH):
+            print(f"[mariadb-mcp] 检测到可用的 MCP HTTP Service: {get_mcp_url()}，直接复用")
+            return None
+        print("[mariadb-mcp] 端口被占用但服务不可用（疑似残留/半死进程），替换为新实例 ...")
+        await _kill_port_owner(MARIADB_MCP_HTTP_PORT)
+        await asyncio.sleep(2)
 
     mcp_dir = Path(MARIADB_MCP_DIR)
     if not (mcp_dir / "pyproject.toml").exists():
@@ -134,10 +208,15 @@ async def ensure_http_server() -> asyncio.subprocess.Process | None:
         _ = asyncio.create_task(_pump(proc.stdout))
     try:
         await _wait_port(MARIADB_MCP_HTTP_HOST, MARIADB_MCP_HTTP_PORT)
+        if not await _wait_mcp_ready(MARIADB_MCP_HTTP_HOST, MARIADB_MCP_HTTP_PORT, MARIADB_MCP_HTTP_PATH):
+            raise RuntimeError(f"MCP HTTP Service 端口已开但握手失败: {get_mcp_url()}")
         print(f"[mariadb-mcp] MCP HTTP Service 已就绪: {get_mcp_url()}")
         return proc
     except Exception:
+        # 注意：uv run 可能已退出，proc.pid 指向已消失的父进程，taskkill 杀不到
+        # 真正监听端口的是孤儿 python 子进程，必须按端口 netstat 定位后清理
         await _terminate_process(proc)
+        await _kill_port_owner(MARIADB_MCP_HTTP_PORT)
         raise
 
 

@@ -169,7 +169,7 @@ async def load_mcp_tools(config_file: str = None):
         config_file: 可选的 JSON 配置文件路径
 
     Returns:
-        (tools: list, client: MultiServerMCPClient | None)
+        (tools: list, clients: list) — clients 为各 MCP 客户端列表，调用方必须保持存活
     """
     try:
         from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -187,25 +187,65 @@ async def load_mcp_tools(config_file: str = None):
         print("[ToolRegistry] 没有启用的 MCP 服务器")
         return [], None
 
-    try:
-        print(f"[ToolRegistry] 连接 MCP 服务器: {list(enabled_config.keys())}")
-        client = MultiServerMCPClient(enabled_config)
-        tools = await client.get_tools()
+    # stdio 型 server 若配置 command="python"，替换为当前解释器绝对路径：
+    # 避免子进程被 PATH 解析到错误的 python（如 cygwin/bin/python）导致
+    # spawn 失败 / 无 mcp 包 → stdio 握手 Connection closed
+    import sys
+    for _name, _cfg in list(enabled_config.items()):
+        _cmd = str(_cfg.get("command", "")).strip().lower()
+        if _cfg.get("transport", "stdio") == "stdio" and _cmd == "python":
+            _new_cfg = dict(_cfg)
+            _new_cfg["command"] = sys.executable
+            enabled_config[_name] = _new_cfg
 
-        # 过滤禁用的工具
-        filtered = [t for t in tools if ENABLED_TOOLS.get(t.name, True)]
+    # 逐 server 独立加载：任一 server 失败只跳过自身，不影响其它服务器
+    # （MultiServerMCPClient 内部用 TaskGroup 并行加载所有 server，一个失败会整体失败）
+    clients: list = []
+    all_tools: list = []
+    for _name, _cfg in list(enabled_config.items()):
+        try:
+            print(f"[ToolRegistry] 连接 MCP 服务器: {_name} ...")
+            _client = MultiServerMCPClient({_name: _cfg})
+            _tools = await _client.get_tools()
+            _filtered = [t for t in _tools if ENABLED_TOOLS.get(t.name, True)]
+            clients.append(_client)
+            all_tools.extend(_filtered)
+            print(f"[ToolRegistry] {_name} 加载了 {len(_filtered)} 个工具")
+            for t in _filtered:
+                print(f"  - {t.name}: {t.description[:80]}")
+        except Exception as _e:
+            _retried = False
+            # http 型 server 连接失败：确保本地 MCP 服务在线后重试一次，
+            # 覆盖"伴随启动失败被 main.py 吞掉 / 孤儿进程协议层未就绪"等竞态
+            if _cfg.get("transport") == "streamable_http":
+                try:
+                    from src import mariadb_mcp_service as _svc
+                    print(f"[ToolRegistry] {_name} 连接失败，尝试确保本地服务在线并重试 ...")
+                    _ = await _svc.ensure_http_server()
+                    _client = MultiServerMCPClient({_name: _cfg})
+                    _tools = await _client.get_tools()
+                    _filtered = [t for t in _tools if ENABLED_TOOLS.get(t.name, True)]
+                    clients.append(_client)
+                    all_tools.extend(_filtered)
+                    print(f"[ToolRegistry] {_name} 重试加载了 {len(_filtered)} 个工具")
+                    for t in _filtered:
+                        print(f"  - {t.name}: {t.description[:80]}")
+                    _retried = True
+                except Exception as _e2:
+                    print(f"[ToolRegistry] ⚠️ {_name} 重试仍失败，已跳过: {_e2}")
+                    import traceback
+                    traceback.print_exc()
+            if not _retried:
+                print(f"[ToolRegistry] ⚠️ {_name} 加载失败，已跳过（不影响其它服务器）: {_e}")
+                import traceback
+                traceback.print_exc()
 
-        print(f"[ToolRegistry] MCP 加载了 {len(filtered)} 个工具")
-        for t in filtered:
-            print(f"  - {t.name}: {t.description[:80]}")
-
-        return filtered, client
-
-    except Exception as e:
-        print(f"[ToolRegistry] MCP 加载失败: {e}")
-        import traceback
-        traceback.print_exc()
+    if not all_tools:
+        print("[ToolRegistry] 没有成功加载任何 MCP 工具")
         return [], None
+
+    print(f"[ToolRegistry] MCP 共加载 {len(all_tools)} 个工具")
+    return all_tools, clients
 
 
 # ============================================================
