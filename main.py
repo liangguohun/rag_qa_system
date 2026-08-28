@@ -134,23 +134,45 @@ async def lifespan(app: FastAPI):
             print("=" * 50)
 
             # ── 前置诊断：直接调用 MCP 工具验证连接 ──
+            # 各工具的连通性测试参数（btc 库含 market 表，为真实对象）
+            _tool_test_args = {
+                "get_current_time": {"format_type": "full"},
+                "calculate": {"expression": "1+1"},
+                "get_word_length": {"word": "test"},
+                "weather_check": {"city": "北京"},
+                "list_databases": {},
+                "list_tables": {"database_name": "btc"},
+                "get_table_schema": {"database_name": "btc", "table_name": "market"},
+                "get_table_schema_with_relations": {"database_name": "btc", "table_name": "market"},
+                "execute_sql": {"database_name": "btc", "sql_query": "SHOW TABLES FROM btc"},
+                "create_database": {"database_name": "mcp_test_conn"},
+            }
             print("\n[诊断] 直接测试 MCP 工具连通性（不走 Agent）:")
             for t in agent_tools:
+                _args = _tool_test_args.get(t.name)
+                if _args is None:
+                    print(f"  ⏭️ {t.name} 无测试参数，跳过")
+                    continue
                 try:
                     print(f"  测试工具 {t.name}...")
-                    if t.name == "get_current_time":
-                        r = await t.ainvoke({"format_type": "full"}) if hasattr(t, 'ainvoke') else t.invoke({"format_type": "full"})
-                    elif t.name == "calculate":
-                        r = await t.ainvoke({"expression": "1+1"}) if hasattr(t, 'ainvoke') else t.invoke({"expression": "1+1"})
-                    elif t.name == "get_word_length":
-                        r = await t.ainvoke({"word": "test"}) if hasattr(t, 'ainvoke') else t.invoke({"word": "test"})
-                    elif t.name == "weather_check":
-                        r = await t.ainvoke({"city": "北京"}) if hasattr(t, 'ainvoke') else t.invoke({"city": "北京"})
-                    else:
-                        r = await t.ainvoke({"query": "test"}) if hasattr(t, 'ainvoke') else t.invoke({"query": "test"})
+                    r = await t.ainvoke(_args) if hasattr(t, 'ainvoke') else t.invoke(_args)
                     print(f"    ✅ {t.name} 返回: {r}")
+                    # create_database 有副作用：测试成功后立即清理测试库
+                    if t.name == "create_database":
+                        for _t2 in agent_tools:
+                            if _t2.name == "execute_sql":
+                                await _t2.ainvoke({
+                                    "database_name": _args["database_name"],
+                                    "sql_query": f"DROP DATABASE IF EXISTS `{_args['database_name']}`",
+                                })
+                                print(f"    🧹 已清理测试库 {_args['database_name']}")
+                                break
                 except Exception as e:
-                    print(f"    ❌ {t.name} 直接调用失败: {e}")
+                    _err = str(e)
+                    if "read-only" in _err.lower() or "forbidden" in _err.lower():
+                        print(f"    ℹ️ {t.name} 服务端只读模式拒绝（非参数错误）: {_err[:100]}")
+                    else:
+                        print(f"    ❌ {t.name} 直接调用失败: {e}")
 
             test_questions = [
                 ("get_current_time", "请用 get_current_time 工具获取当前完整时间"),

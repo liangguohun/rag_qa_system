@@ -62,6 +62,9 @@ REDIS_CHECKPOINT_PREFIX = os.getenv("REDIS_CHECKPOINT_PREFIX", "langgraph:checkp
 #   http  —— 默认。自动拉起本地 vendor/mariadb-mcp 的 MCP HTTP Service 后访问
 #   stdio —— 可选。跑内嵌 MCP 子进程（npx / uv），无需外部服务
 MARIADB_MCP_TRANSPORT = "http"
+# MCP 服务端只读开关：true=只读（create_database 等写操作被拒绝），false=允许写操作
+# 透传为服务端的 MCP_READ_ONLY 环境变量（vendor/mariadb-mcp/src/config.py）
+MARIADB_MCP_READ_ONLY = os.getenv("MARIADB_MCP_READ_ONLY", "false")
 # 数据库连接信息（透传给 MariaDB MCP Server）
 MARIADB_DB_CONFIG = {
     "DB_HOST": os.getenv("DB_HOST", "127.0.0.1"),

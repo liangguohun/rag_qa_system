@@ -23,6 +23,7 @@ if str(_ROOT) not in sys.path:
 from config.settings import (
     MARIADB_MCP_TRANSPORT,
     MARIADB_DB_CONFIG,
+    MARIADB_MCP_READ_ONLY,
     MARIADB_MCP_HTTP_HOST,
     MARIADB_MCP_HTTP_PORT,
     MARIADB_MCP_HTTP_PATH,
@@ -200,7 +201,7 @@ async def ensure_http_server() -> asyncio.subprocess.Process | None:
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         cwd=str(mcp_dir),
-        env={**os.environ, **MARIADB_DB_CONFIG},
+        env={**os.environ, **MARIADB_DB_CONFIG, "MCP_READ_ONLY": MARIADB_MCP_READ_ONLY},
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
