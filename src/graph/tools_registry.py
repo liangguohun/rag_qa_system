@@ -37,6 +37,10 @@ from typing import Optional, List
 
 from langchain_core.tools import tool, StructuredTool
 
+# 统一 asyncio 运行器：关闭循环前主动关闭 stdio 子进程 transport，
+# 避免 "BaseSubprocessTransport.__del__ ... RuntimeError: Event loop is closed"
+from src.async_utils import run_coro
+
 # MCP 配置导入（项目根目录已在 sys.path 中）
 from config.mcp_config import (
     load_mcp_config,
@@ -244,6 +248,12 @@ async def load_mcp_tools(config_file: str = None):
         print("[ToolRegistry] 没有成功加载任何 MCP 工具")
         return [], None
 
+    # 让 stdio 子进程 transport 的关闭回调在事件循环关闭前执行完毕。
+    # 否则 asyncio.run() 关闭循环后，GC 回收 transport 会触发:
+    #   Exception ignored in: <function BaseSubprocessTransport.__del__>
+    #   RuntimeError: Event loop is closed
+    await asyncio.sleep(0.05)
+
     print(f"[ToolRegistry] MCP 共加载 {len(all_tools)} 个工具")
     return all_tools, clients
 
@@ -263,9 +273,11 @@ def _make_sync_compatible(tool):
       LangGraph 的 ToolNode 会走 _execute_tool_sync 路径，触发此错误。
 
     解决方案:
-      对 async-only 工具补上同步包装器，在子线程中用 asyncio.run() 执行。
+      对 async-only 工具补上同步包装器，在子线程中用 run_coro() 执行
+      （run_coro 等价于 asyncio.run()，但在关闭循环前主动关闭 stdio 子进程，
+      避免残留孤儿进程 / "Event loop is closed" GC 警告）。
       由于主线程通过 asyncio.to_thread 把 agent.invoke 调度到子线程，
-      子线程中不存在运行中的事件循环，直接 asyncio.run() 是安全且高效的。
+      子线程中不存在运行中的事件循环，直接 run_coro() 是安全且高效的。
 
     Args:
         tool: 原始工具实例
@@ -295,7 +307,7 @@ def _make_sync_compatible(tool):
     _orig_tool = tool  # 闭包引用
 
     def _sync_runner(*args, **kwargs):
-        """在子线程中运行，asyncio.run() 是安全的。
+        """在子线程中运行，run_coro() 是安全的。
         
         LangGraph ToolNode 调用路径：
           tool.invoke(call_args_dict, config=config)
@@ -308,12 +320,12 @@ def _make_sync_compatible(tool):
         # config 通过 **kwargs 或单独传入
         if len(args) == 1 and isinstance(args[0], dict) and not kwargs:
             # 最常见路径: tool.invoke({"format_type": "full"})
-            return asyncio.run(_orig_tool.ainvoke(args[0]))
+            return run_coro(_orig_tool.ainvoke(args[0]))
         elif len(args) == 1 and isinstance(args[0], dict) and kwargs:
             # 带 config: tool.invoke({"format_type": "full"}, config=...)
-            return asyncio.run(_orig_tool.ainvoke(args[0], **kwargs))
+            return run_coro(_orig_tool.ainvoke(args[0], **kwargs))
         elif len(args) == 0 and kwargs:
-            return asyncio.run(_orig_tool.ainvoke(kwargs))
+            return run_coro(_orig_tool.ainvoke(kwargs))
         else:
             # 兜底分支：参数既非"单一 dict"也非"纯 kwargs"（例如无参工具 list_databases 收到 {}）。
             # 把 dict 参数合并后正常调用；绝不把 str(args)/str(kwargs) 当参数传（那是无效参数，
@@ -329,8 +341,8 @@ def _make_sync_compatible(tool):
             _cfg = kwargs.pop("config", None)
             merged.update(kwargs)
             if _cfg is not None:
-                return asyncio.run(_orig_tool.ainvoke(merged, config=_cfg))
-            return asyncio.run(_orig_tool.ainvoke(merged))
+                return run_coro(_orig_tool.ainvoke(merged, config=_cfg))
+            return run_coro(_orig_tool.ainvoke(merged))
 
     print(f"[ToolRegistry] 包装 MCP async 工具: {tool.name}")
     return StructuredTool.from_function(

@@ -10,6 +10,9 @@ from contextlib import asynccontextmanager
 from src.rag_chain import create_rag_chain
 # test_tools, 
 from src.rag_chain import create_agent_with_tools, test_mcp_tools_async
+# 统一的 asyncio 运行器：关闭循环前主动关闭 stdio 子进程，避免
+# "BaseSubprocessTransport.__del__ ... RuntimeError: Event loop is closed" 警告
+from src.async_utils import run_coro
 from typing import Optional
 # MariaDB MCP Service 启停管理（http 伴随启动 / stdio 延后启动）
 from src.mariadb_mcp_service import start_mariadb_mcp_service, stop_mariadb_mcp_service
@@ -421,9 +424,9 @@ def test_mcp():
         # 可以指定配置文件路径
         config_file = ROOT / "config" / "mcp_servers.json"
         if config_file.exists():
-            asyncio.run(test_mcp_tools_async(str(config_file)))
+            run_coro(test_mcp_tools_async(str(config_file)))
         else:
-            asyncio.run(test_mcp_tools_async())
+            run_coro(test_mcp_tools_async())
     except Exception as e:
         print(f"MCP测试失败: {e}")
 
@@ -443,7 +446,7 @@ def test_mcp():
         use_mcp = True  # 可以改为False禁用MCP
         config_file = ROOT / "config" / "mcp_servers.json"
         
-        agent, tools, _mcp_client = asyncio.run(create_agent_with_tools(
+        agent, tools, _mcp_client = run_coro(create_agent_with_tools(
             llm, 
             use_mcp=use_mcp,
             mcp_config_file=str(config_file) if config_file.exists() else None,
@@ -462,8 +465,13 @@ def test_mcp():
         traceback.print_exc()
 
 if __name__ == "__main__":
-    # 调用工具用例
-    test_mcp()
+    # 注意：不要在这里调用 test_mcp()。
+    # test_mcp() 会与 uvicorn lifespan 的初始化完全重复（RAG 链 / Agent / MCP 工具都会再建一遍），
+    # 且其执行时 mariadb HTTP Service（lifespan 里才启动，端口 9001）尚未就绪，加载 mariadb 工具必然失败，
+    # 表现为启动日志反复出现初始化/失败，看起来像"程序重启几次才稳定"，实际是重复初始化。
+    # lifespan（见文件顶部）已包含：mariadb 服务启动 → RAG 链 → Agent → MCP 工具连通性测试。
+    # 如需单独调试 MCP 工具，可临时取消下一行注释：
+    # test_mcp()
 
     # 问答用例
     import uvicorn

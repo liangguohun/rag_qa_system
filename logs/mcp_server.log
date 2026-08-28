@@ -1,0 +1,7 @@
+2026-08-28 14:57:59,261 - config - ERROR - DB_USER is empty or missing from the environment or .env file.
+2026-08-28 14:57:59,263 - config - ERROR - DB_PASSWORD is missing from the environment or .env file.
+2026-08-28 14:57:59,265 - config - INFO - Selected Embedding Provider: None
+2026-08-28 14:57:59,267 - config - INFO - No EMBEDDING_PROVIDER selected or it is set to None. Disabling embedding features.
+2026-08-28 14:57:59,268 - config - INFO - Read-only mode: True
+2026-08-28 14:57:59,269 - config - INFO - Block sensitive SHOW commands: True
+2026-08-28 14:57:59,271 - config - INFO - Logging to console and to file: logs/mcp_server.log (Level: INFO, MaxSize: 10485760B, Backups: 5)

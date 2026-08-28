@@ -17,6 +17,7 @@ from langchain_openai import ChatOpenAI
 
 from zhipuai import ZhipuAI  # 官方SDK
 import json
+import asyncio
 
 
 # mcp 接入修改
@@ -358,6 +359,10 @@ async def create_agent_with_tools(llm, use_mcp: bool = True, mcp_config_file: st
     print(f"[AgentFactory] Agent 创建完成, 工具={len(all_tools)}, "
           f"type={type(agent).__name__}")
 
+    # 让 stdio 子进程 transport 的关闭回调在事件循环关闭前执行完毕，
+    # 避免 asyncio.run() 关闭循环后 GC 报 "RuntimeError: Event loop is closed"
+    await asyncio.sleep(0.05)
+
     return agent, all_tools, registry.mcp_client
 
 # ---------------------- 异步MCP工具测试 ----------------------
@@ -385,6 +390,10 @@ async def test_mcp_tools_async(config_file: str = None):
             print(f"结果: {result}")
         except Exception as e:
             print(f"调用失败: {e}")
+
+    # 让 stdio 子进程 transport 的关闭回调在事件循环关闭前执行完毕，
+    # 避免 asyncio.run() 关闭循环后 GC 报 "RuntimeError: Event loop is closed"
+    await asyncio.sleep(0.05)
 
 def create_rag_chain():
     """创建 RAG 链（LangChain v1.0+ 无警告版）"""
