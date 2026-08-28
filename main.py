@@ -14,7 +14,7 @@ from typing import Optional
 # MariaDB MCP Service 启停管理（http 伴随启动 / stdio 延后启动）
 from src.mariadb_mcp_service import start_mariadb_mcp_service, stop_mariadb_mcp_service
 
-# 🔥 关键：用线程运行，不让 LLM 卡住异步
+# 关键：用线程运行，不让 LLM 卡住异步
 import asyncio
 import uuid
 
@@ -99,16 +99,16 @@ async def lifespan(app: FastAPI):
     try:
         mariadb_mcp_proc = await start_mariadb_mcp_service()
     except Exception as e:
-        print(f"⚠️ MariaDB MCP Service 启动失败（不影响主服务）：{e}")
+        print(f"[WARN] MariaDB MCP Service 启动失败（不影响主服务）：{e}")
         mariadb_mcp_proc = None
 
     # 尝试初始化 RAG 链；如果失败，只打印错误并继续运行应用
     try:
         rag_chain, retriever, llm = create_rag_chain()
         if rag_chain is not None:
-            print("✅ RAG 链初始化完成")
+            print("[OK] RAG 链初始化完成")
         else:
-            print("ℹ️  RAG 检索已关闭（ENABLE_RAG_RETRIEVAL=False），仅使用纯 LLM 对话")
+            print("[INFO] RAG 检索已关闭（ENABLE_RAG_RETRIEVAL=False），仅使用纯 LLM 对话")
 
         # 同时创建 MCP Agent，优先使用 MCP 工具
         try:
@@ -120,11 +120,11 @@ async def lifespan(app: FastAPI):
                 retriever=retriever,
             )
             if agent is not None:
-                print(f"✅ Agent 初始化完成，工具数量：{len(agent_tools)}")
+                print(f"[OK] Agent 初始化完成，工具数量：{len(agent_tools)}")
             else:
-                print("⚠️ Agent 初始化失败：未创建 Agent")
+                print("[WARN] Agent 初始化失败：未创建 Agent")
         except Exception as e:
-            print(f"⚠️ Agent 初始化失败：{e}")
+            print(f"[WARN] Agent 初始化失败：{e}")
             agent, agent_tools, mcp_client = None, [], None
 
         # ── 启动完成后执行 MCP 工具测试 ──
@@ -151,12 +151,12 @@ async def lifespan(app: FastAPI):
             for t in agent_tools:
                 _args = _tool_test_args.get(t.name)
                 if _args is None:
-                    print(f"  ⏭️ {t.name} 无测试参数，跳过")
+                    print(f"  [SKIP] {t.name} 无测试参数，跳过")
                     continue
                 try:
                     print(f"  测试工具 {t.name}...")
                     r = await t.ainvoke(_args) if hasattr(t, 'ainvoke') else t.invoke(_args)
-                    print(f"    ✅ {t.name} 返回: {r}")
+                    print(f"    [OK] {t.name} 返回: {r}")
                     # create_database 有副作用：测试成功后立即清理测试库
                     if t.name == "create_database":
                         for _t2 in agent_tools:
@@ -165,14 +165,14 @@ async def lifespan(app: FastAPI):
                                     "database_name": _args["database_name"],
                                     "sql_query": f"DROP DATABASE IF EXISTS `{_args['database_name']}`",
                                 })
-                                print(f"    🧹 已清理测试库 {_args['database_name']}")
+                                print(f"    [CLEAN] 已清理测试库 {_args['database_name']}")
                                 break
                 except Exception as e:
                     _err = str(e)
                     if "read-only" in _err.lower() or "forbidden" in _err.lower():
-                        print(f"    ℹ️ {t.name} 服务端只读模式拒绝（非参数错误）: {_err[:100]}")
+                        print(f"    [INFO] {t.name} 服务端只读模式拒绝（非参数错误）: {_err[:100]}")
                     else:
-                        print(f"    ❌ {t.name} 直接调用失败: {e}")
+                        print(f"    [FAIL] {t.name} 直接调用失败: {e}")
 
             test_questions = [
                 ("get_current_time", "请用 get_current_time 工具获取当前完整时间"),
@@ -218,8 +218,8 @@ async def lifespan(app: FastAPI):
     try:
         await stop_mariadb_mcp_service(mariadb_mcp_proc)
     except Exception as e:
-        print(f"⚠️ MariaDB MCP Service 停止异常：{e}")
-    print("🛑 服务关闭")
+        print(f"[WARN] MariaDB MCP Service 停止异常：{e}")
+    print("[STOP] 服务关闭")
 
 app = FastAPI(
     title="RAG知识库问答系统",
@@ -274,7 +274,7 @@ async def ask_question(request: QueryRequest):
         print("AI 返回：", answer)
         return {"answer": answer, "sources": []}
     except asyncio.TimeoutError:
-        print(f"⏰ 问答超时（{request.timeout}秒）")
+        print(f"[TIMEOUT] 问答超时（{request.timeout}秒）")
         raise HTTPException(
             status_code=504, 
             detail=f"问答超时，请稍后重试（超时时间：{request.timeout}秒）"
@@ -416,7 +416,7 @@ def test_mcp():
     import asyncio
     
     # 1. 测试MCP工具（使用配置）
-    print("\n🔧 测试MCP工具...")
+    print("\n[MCP] 测试MCP工具...")
     try:
         # 可以指定配置文件路径
         config_file = ROOT / "config" / "mcp_servers.json"
@@ -454,7 +454,7 @@ def test_mcp():
             print("Agent创建失败")
             return
 
-        print(f"✅ Agent 创建完成，工具数量：{len(tools)}")
+        print(f"[OK] Agent 创建完成，工具数量：{len(tools)}")
 
     except Exception as e:
         print(f"初始化失败: {e}")

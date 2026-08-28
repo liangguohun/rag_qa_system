@@ -318,7 +318,7 @@ async def create_agent_with_tools(llm, use_mcp: bool = True, mcp_config_file: st
 
     all_tools = registry.get_all_tools()
     if not all_tools:
-        print("⚠️ 没有可用的工具，Agent 将无法调用工具")
+        print("[WARN] 没有可用的工具，Agent 将无法调用工具")
         return None, [], registry.mcp_client
 
     # ── 2. 构建 system_prompt ──

@@ -15,7 +15,7 @@ async def test_tools():
     print(f"🔍 文件是否存在: {server_script.exists()}")
     
     if not server_script.exists():
-        print(f"❌ 找不到 MCP 服务器文件!")
+        print(f"[FAIL] 找不到 MCP 服务器文件!")
         return
     
     try:
@@ -29,7 +29,7 @@ async def test_tools():
         
         print("🔄 正在连接 MCP 服务器...")
         tools = await client.get_tools()
-        print(f"✅ 成功加载 {len(tools)} 个工具:")
+        print(f"[OK] 成功加载 {len(tools)} 个工具:")
         
         for tool in tools:
             print(f"   - {tool.name}: {tool.description}")
@@ -41,7 +41,7 @@ async def test_tools():
             print(f"📅 结果: {result}")
             
     except Exception as e:
-        print(f"❌ 发生错误: {e}")
+        print(f"[FAIL] 发生错误: {e}")
         import traceback
         traceback.print_exc()
 

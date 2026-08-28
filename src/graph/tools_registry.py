@@ -232,11 +232,11 @@ async def load_mcp_tools(config_file: str = None):
                         print(f"  - {t.name}: {t.description[:80]}")
                     _retried = True
                 except Exception as _e2:
-                    print(f"[ToolRegistry] ⚠️ {_name} 重试仍失败，已跳过: {_e2}")
+                    print(f"[ToolRegistry] [WARN] {_name} 重试仍失败，已跳过: {_e2}")
                     import traceback
                     traceback.print_exc()
             if not _retried:
-                print(f"[ToolRegistry] ⚠️ {_name} 加载失败，已跳过（不影响其它服务器）: {_e}")
+                print(f"[ToolRegistry] [WARN] {_name} 加载失败，已跳过（不影响其它服务器）: {_e}")
                 import traceback
                 traceback.print_exc()
 
@@ -315,7 +315,22 @@ def _make_sync_compatible(tool):
         elif len(args) == 0 and kwargs:
             return asyncio.run(_orig_tool.ainvoke(kwargs))
         else:
-            return asyncio.run(_orig_tool.ainvoke({"args": str(args), "kwargs": str(kwargs)}))
+            # 兜底分支：参数既非"单一 dict"也非"纯 kwargs"（例如无参工具 list_databases 收到 {}）。
+            # 把 dict 参数合并后正常调用；绝不把 str(args)/str(kwargs) 当参数传（那是无效参数，
+            # 会让 pydantic 报 Unexpected keyword argument）。
+            merged: dict = {}
+            for _a in args:
+                if isinstance(_a, dict):
+                    merged.update(_a)
+                else:
+                    raise TypeError(
+                        f"工具 {_orig_tool.name} 收到无法解析的位置参数: {_a!r}"
+                    )
+            _cfg = kwargs.pop("config", None)
+            merged.update(kwargs)
+            if _cfg is not None:
+                return asyncio.run(_orig_tool.ainvoke(merged, config=_cfg))
+            return asyncio.run(_orig_tool.ainvoke(merged))
 
     print(f"[ToolRegistry] 包装 MCP async 工具: {tool.name}")
     return StructuredTool.from_function(
