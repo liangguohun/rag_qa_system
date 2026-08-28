@@ -23,7 +23,7 @@ USE_ZHIPU = True      # 开启智谱免费模型
 # 智谱 AI 密钥（去官网免费拿）
 ZHIPU_API_KEY = "dacc77c57e2e4e5ab307dd010c52d3c9.SgfGeAcMRfBAG1dT"
 # 免费模型名称（固定不要改）
-ZHIPU_MODEL_NAME = "glm-4.7-flash"
+ZHIPU_MODEL_NAME = "glm-4.5-air"
 # 嵌入模型（免费、轻量、中文强） "embedding-2" 不免费，他们的
 ZHIPU_EMBEDDING_MODEL = "embedding-2"
 

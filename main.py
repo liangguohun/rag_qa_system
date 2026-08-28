@@ -183,9 +183,8 @@ async def lifespan(app: FastAPI):
                     print(f"最终回答: {ans}")
                     print("-" * 40)
                 except Exception as e:
-                    print(f"Agent调用失败: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    # 控制台只输出带颜色的简洁错误，不打印冗长 traceback
+                    print(f"\033[31m[Agent] 调用失败: {e}\033[0m")
     except Exception as e:
         print(f"RAG 链初始化失败（继续运行）：{e}")
         import traceback

@@ -30,7 +30,29 @@ ReAct 循环对照:
   call_model          ToolNode
 """
 
+import asyncio
+import time
+
+from openai import APIError, RateLimitError
+
 from langgraph.prebuilt import ToolNode
+
+# ── LLM 限流/服务端错误退避重试参数 ──
+MAX_LLM_RETRIES = 3          # 最多尝试次数（含首次）
+LLM_RETRY_BASE_DELAY = 2.0   # 首次重试等待秒数（指数增长）
+LLM_RETRY_MAX_DELAY = 30.0   # 单次最大等待秒数
+
+
+def _should_retry_llm(exc) -> bool:
+    """是否值得退避重试：429 限流 / 5xx 服务端错误 / 网络连接错误"""
+    if isinstance(exc, RateLimitError):
+        return True
+    if isinstance(exc, APIError):
+        code = getattr(exc, "status_code", None)
+        if code is None:  # 连接层错误（APIConnectionError 等）
+            return True
+        return 500 <= code < 600
+    return False
 
 
 # ============================================================
@@ -59,8 +81,17 @@ def create_call_model_node(llm_with_tools):
     """
     def call_model(state, config=None):
         messages = state.get("messages", [])
-        response = llm_with_tools.invoke(messages)
-        return {"messages": [response]}
+        for attempt in range(1, MAX_LLM_RETRIES + 1):
+            try:
+                response = llm_with_tools.invoke(messages)
+                return {"messages": [response]}
+            except APIError as e:
+                if not _should_retry_llm(e) or attempt >= MAX_LLM_RETRIES:
+                    raise
+                delay = min(LLM_RETRY_BASE_DELAY * (2 ** (attempt - 1)), LLM_RETRY_MAX_DELAY)
+                print(f"\033[33m[LLM] 调用受限（{getattr(e, 'status_code', '连接错误')}），"
+                      f"{delay:.0f}s 后重试 ({attempt}/{MAX_LLM_RETRIES})\033[0m")
+                time.sleep(delay)
 
     return call_model
 
@@ -81,8 +112,17 @@ def create_call_model_node_async(llm_with_tools):
     """
     async def call_model(state, config=None):
         messages = state.get("messages", [])
-        response = await llm_with_tools.ainvoke(messages)
-        return {"messages": [response]}
+        for attempt in range(1, MAX_LLM_RETRIES + 1):
+            try:
+                response = await llm_with_tools.ainvoke(messages)
+                return {"messages": [response]}
+            except APIError as e:
+                if not _should_retry_llm(e) or attempt >= MAX_LLM_RETRIES:
+                    raise
+                delay = min(LLM_RETRY_BASE_DELAY * (2 ** (attempt - 1)), LLM_RETRY_MAX_DELAY)
+                print(f"\033[33m[LLM] 调用受限（{getattr(e, 'status_code', '连接错误')}），"
+                      f"{delay:.0f}s 后重试 ({attempt}/{MAX_LLM_RETRIES})\033[0m")
+                await asyncio.sleep(delay)
 
     return call_model
 
